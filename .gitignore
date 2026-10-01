@@ -1,0 +1,13 @@
+**/node_modules/
+**/.env
+**/.expo/
+**/data/
+**/dist*/
+**/release/
+**/public/
+*.sqlite*
+browser-*
+browser-runtime/
+source-draft/
+upload/
+deliverables/

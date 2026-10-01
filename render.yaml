@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: aquadrive-api
+    runtime: docker
+    plan: 0.5c-512mb
+    numInstances: 1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    disk:
+      name: aquadrive-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_PATH
+        value: /var/data/aquadrive.sqlite
+      - key: CURRENCY
+        value: USD
+      - key: TRUST_PROXY_HOPS
+        value: 1
+      - key: PUBLIC_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
