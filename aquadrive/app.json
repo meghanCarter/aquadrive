@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "AQUADRIVE",
+    "slug": "aquadrive",
+    "version": "2.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "predictiveBackGestureEnabled": false,
+      "package": "com.aquadrive.mobile"
+    },
+    "web": {
+      "output": "single"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "AQUADRIVE uses your location for delivery addresses and active delivery tracking."
+        }
+      ]
+    ],
+    "scheme": "aquadrive"
+  }
+}
