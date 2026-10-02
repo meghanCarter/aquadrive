@@ -21,7 +21,11 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "AQUADRIVE uses your location for delivery addresses and active delivery tracking."
+          "locationWhenInUsePermission": "AQUADRIVE uses your location for delivery addresses and active delivery tracking.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true,
+          "isIosBackgroundLocationEnabled": true,
+          "locationAlwaysAndWhenInUsePermission": "AQUADRIVE shares supplier location during an active delivery, including when the app is in the background. Sharing can be stopped in delivery details."
         }
       ]
     ],

@@ -1,8 +1,8 @@
 # AQUADRIVE v2
 
-A mobile client and persistent API for water delivery. Supports tanker water and 20 litre bottles, separate customer/supplier/admin accounts, server-calculated quotes, stock reservations, supplier approval, delivery transitions, foreground GPS sharing, cash receipts and a configurable EcoCash adapter through Paynow.
+A mobile client and persistent API for water delivery. Supports tanker water and 20 litre bottles, separate customer/supplier/admin accounts, server-calculated quotes, stock reservations, supplier approval, delivery transitions, foreground and native background GPS sharing, cash receipts and a configurable EcoCash adapter through Paynow.
 
-**Status:** implemented and locally tested. No public deployment, signed APK or live EcoCash transaction is included in this package. This is a pilot implementation, not a verified production launch.
+**Status:** a free pilot demo exists at https://aquadrive-demo.onrender.com. The latest interface and tracking changes are locally validated and require publication. No signed APK or live EcoCash transaction has been verified. Free-demo data can disappear on restart.
 
 ## Contents
 
@@ -57,7 +57,10 @@ Administrator signup is deliberately unavailable. Approval is an operational rev
 - EcoCash is disabled unless server-side merchant credentials exist. It is initiated after completed delivery, so there is no prepayment-refund path for cancelled deliveries in this version.
 - Payment attempts are saved before contacting the gateway. Unknown or rejected attempts require operator investigation rather than an automatic second debit.
 - Gateway confirmation verifies its signature, merchant reference and amount. Webhooks are confirmed by polling the stored gateway URL. Disputed/refunded states can be reconciled.
-- GPS sharing requires supplier permission and stops when the delivery screen closes or the app is backgrounded. Customers can open the last reported supplier coordinates in Google Maps. This is not continuous background tracking or an embedded navigation engine.
+- The delivery screen embeds a map with the supplier position, destination, GPS accuracy and stale-location warnings. Customers can select a delivery pin when booking.
+- Screen-only GPS sharing requires supplier permission. Installed native builds also offer opt-in background tracking during the active delivery; Expo Go and browser builds do not provide this mode. Background tracking stops on logout or a completed/cancelled delivery. Physical-device/background validation remains required; operating-system restrictions can interrupt updates.
+- Set `ROUTING_BASE_URL` on the server to an HTTPS OSRM-compatible routing service to enable road-based ETA and route geometry. Fresh GPS with known accuracy within 200 m and a destination pin are required. Routing failures display ETA unavailable. This estimate does not include live traffic or truck restrictions. The routing provider receives delivery coordinates; choose a provider suitable for the deployment.
+- The map uses Leaflet and attributed OpenStreetMap tiles. Follow the tile provider usage policy before scaling.
 - Active screens refresh from the API every 8 seconds. No push notifications are included.
 
 ## Tests

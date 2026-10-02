@@ -6,6 +6,7 @@ import {randomUUID,randomBytes} from 'node:crypto';
 import {openDb,transaction} from './db.mjs';
 import {hashPassword,verifyPassword,publicUser,session,tokenHash} from './auth.mjs';
 import {createGateway} from './gateway.mjs';
+import {createRouting} from './routing.mjs';
 const now=()=>new Date().toISOString();
 const fail=(status,message)=>{const e=new Error(message);e.status=status;throw e;};
 const text=(value,label,min=1,max=200)=>{if(typeof value!=='string'||value.trim().length<min||value.trim().length>max)fail(400,`${label} must contain ${min}–${max} characters.`);return value.trim();};
@@ -15,7 +16,7 @@ const choices={tanker:[1000,2500,5000,10000],bottled:[1,2,4,8,12,24]};
 const coordinate=(value)=>{if(value===null||value===undefined)return null;return {latitude:number(value.latitude,'latitude',-90,90),longitude:number(value.longitude,'longitude',-180,180)};};
 function supplierData(row){return {...JSON.parse(row.profile),id:row.id,approved:!!row.approved&&row.approval_expires>Date.now(),approvalExpires:row.approval_expires,available:!!row.available,stock:row.stock};}
 export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite',config={},gateway}={}){
- const db=openDb(dbPath);const app=express();const publicUrl=config.publicUrl||process.env.PUBLIC_URL||'http://localhost:4000';
+ const route=createRouting(config.routing);const db=openDb(dbPath);const app=express();const publicUrl=config.publicUrl||process.env.PUBLIC_URL||'http://localhost:4000';
  const configuredGateway=gateway||createGateway(publicUrl);const currency=config.currency||process.env.CURRENCY||'USD';
  if(!['USD','ZWG'].includes(currency))throw Error('CURRENCY must be USD or ZWG.');
  app.disable('x-powered-by');app.set('trust proxy',config.trustProxy??Number(process.env.TRUST_PROXY_HOPS||0));app.use(helmet());
@@ -33,7 +34,7 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
  const saveOrder=(row,order,user,action)=>{const data={...order};delete data.version;db.prepare('UPDATE orders SET data=?,version=version+1 WHERE id=? AND version=?').run(JSON.stringify(data),row.id,row.version);event(row.id,user,action);return {...data,version:row.version+1};};
  const supplierOwn=user=>{const row=db.prepare('SELECT * FROM suppliers WHERE id=?').get(user.id);if(!row)fail(404,'Create your supplier profile first.');return row;};
  app.get('/health',(_req,res)=>{db.prepare('SELECT 1').get();res.json({status:'ok'});});
- app.get('/api/config',(_req,res)=>res.json({currency,ecocashEnabled:!!configuredGateway,locationMode:'foreground',pollSeconds:8}));
+ app.get('/api/config',(_req,res)=>res.json({currency,ecocashEnabled:!!configuredGateway,locationMode:'foreground-web-background-native',pollSeconds:8}));
  app.post('/api/auth/register',authLimit,wrap(async(req,res)=>{
   const name=text(req.body.name,'Name',2,100),email=text(req.body.email,'Email',5,200).toLowerCase(),phone=text(req.body.phone,'Phone',8,30),password=text(req.body.password,'Password',12,128);
   if(!/^\S+@\S+\.\S+$/.test(email))fail(400,'Enter a valid email.');const userRole=req.body.role;if(!['customer','supplier'].includes(userRole))fail(400,'Only customer and supplier registration is allowed.');
@@ -90,6 +91,7 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
  }));
  app.get('/api/orders',authenticated,(req,res)=>{let rows;if(req.user.role==='admin')rows=db.prepare('SELECT * FROM orders ORDER BY rowid DESC LIMIT 200').all();else rows=db.prepare('SELECT * FROM orders WHERE customer_id=? OR supplier_id=? ORDER BY rowid DESC LIMIT 200').all(req.user.id,req.user.id);res.json(rows.map(r=>({...JSON.parse(r.data),version:r.version})));});
  app.get('/api/orders/:id',authenticated,wrap((req,res)=>res.json(getOrder(req.params.id,req.user).order)));
+ app.get('/api/orders/:id/route',authenticated,wrap(async(req,res)=>{const {order}=getOrder(req.params.id,req.user);res.set('Cache-Control','no-store').json(await route(order));}));
  app.post('/api/orders',authenticated,role('customer'),wrap((req,res)=>{
   const b=req.body,key=text(req.headers['idempotency-key'],'Order request key',8,100);const previous=db.prepare('SELECT * FROM orders WHERE customer_id=? AND idempotency_key=?').get(req.user.id,key);if(previous)return res.json({...JSON.parse(previous.data),version:previous.version});
   const type=b.type,quantity=b.quantity;if(!choices[type]?.includes(quantity))fail(400,'Invalid water quantity.');const address=text(b.address,'Delivery address',8,300),city=text(b.city,'City',2,80);const location=coordinate(b.location);if(!['cash','ecocash'].includes(b.paymentMethod))fail(400,'Invalid payment method.');if(b.paymentMethod==='ecocash'&&!configuredGateway)fail(503,'EcoCash is not configured. Choose cash.');
@@ -111,7 +113,7 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
   });res.json(result);
  }));
  app.post('/api/orders/:id/location',authenticated,role('supplier'),wrap((req,res)=>{
-  const result=transaction(db,()=>{const {row,order}=getOrder(req.params.id,req.user);if(row.supplier_id!==req.user.id)fail(403,'Permission denied.');if(!['On the way','Arrived'].includes(order.status))fail(409,'Location sharing is only available during delivery.');const location=coordinate(req.body);order.driverLocation={...location,accuracy:number(req.body.accuracy??0,'accuracy',0,100000),at:now()};return saveOrder(row,order,req.user,'location');});res.json(result);
+  const result=transaction(db,()=>{const {row,order}=getOrder(req.params.id,req.user);if(row.supplier_id!==req.user.id)fail(403,'Permission denied.');if(!['On the way','Arrived'].includes(order.status))fail(409,'Location sharing is only available during delivery.');const location=coordinate(req.body);if(!location)fail(400,'GPS coordinates are required.');const captured=req.body.capturedAt===undefined?Date.now():number(req.body.capturedAt,'GPS timestamp',0,Date.now()+30000);if(Date.now()-captured>120000)fail(400,'GPS reading is too old.');if(order.driverLocation&&captured<Date.parse(order.driverLocation.at))fail(409,'A newer GPS reading is already stored.');order.driverLocation={...location,accuracy:req.body.accuracy==null?null:number(req.body.accuracy,'accuracy',0,100000),at:new Date(captured).toISOString()};return saveOrder(row,order,req.user,'location');});res.json(result);
  }));
  app.get('/api/orders/:id/events',authenticated,wrap((req,res)=>{getOrder(req.params.id,req.user);res.json(db.prepare('SELECT action,at FROM events WHERE order_id=? ORDER BY id').all(req.params.id));}));
  app.post('/api/orders/:id/pay/ecocash',authenticated,role('customer'),wrap(async(req,res)=>{

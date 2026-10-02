@@ -2,6 +2,7 @@ import React,{createContext,useCallback,useContext,useEffect,useRef,useState} fr
 import {Platform} from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import {User} from './types';
+import {stopBackgroundTracking} from './background-location';
 const configured=process.env.EXPO_PUBLIC_API_URL||'';
 export const API_URL=(configured||(Platform.OS==='web'&&typeof window!=='undefined'?window.location.origin:'')).replace(/\/$/,'');
 export class ApiError extends Error {constructor(message:string,public status:number){super(message);}}
@@ -17,7 +18,7 @@ type Session={user:User|null;ready:boolean;startupError:string;retry:()=>Promise
 const Context=createContext<Session|null>(null);
 export function SessionProvider({children}:{children:React.ReactNode}){
  const [user,setUser]=useState<User|null>(null),[token,setToken]=useState<string|null>(null),[ready,setReady]=useState(false),[startupError,setStartupError]=useState('');const tokenRef=useRef<string|null>(null);
- const clear=useCallback(async()=>{tokenRef.current=null;setToken(null);setUser(null);await save(null);},[]);
+ const clear=useCallback(async()=>{await stopBackgroundTracking();tokenRef.current=null;setToken(null);setUser(null);await save(null);},[]);
  const retry=useCallback(async()=>{try{const value=await stored();setReady(false);setStartupError('');if(value){tokenRef.current=value;const profile=await request<User>('/api/me',value);setToken(value);setUser(profile);}}catch(e){if(e instanceof ApiError&&e.status===401)await clear();else setStartupError((e as Error).message);}finally{setReady(true);}},[clear]);useEffect(()=>{const initial=setTimeout(()=>void retry(),0);return()=>clearTimeout(initial);},[retry]);
  const api=useCallback(async<T,>(path:string,body?:unknown,method?:string,headers?:Record<string,string>)=>{try{return await request<T>(path,tokenRef.current,body,method,headers);}catch(e){if(e instanceof ApiError&&e.status===401)await clear();throw e;}},[clear]);
  const authenticate=async(mode:'login'|'register',body:unknown)=>{const data=await request<{token:string;user:User}>(`/api/auth/${mode}`,null,body);await save(data.token);tokenRef.current=data.token;setToken(data.token);setUser(data.user);};

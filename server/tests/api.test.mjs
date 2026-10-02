@@ -88,3 +88,19 @@ test('bottled orders use bottle quantities, delivery fees and available stock',a
  const result=await place(h,buyer,supplier,randomUUID(),{type:'bottled',quantity:4});assert.equal(result.status,201);assert.equal(result.data.totalCents,1900);assert.equal((await place(h,buyer,supplier,randomUUID(),{type:'bottled',quantity:1})).status,409);
  const cancelResult=await act(h,buyer,result.data,'cancel',{reason:'Test cancellation'});assert.equal(cancelResult.status,200);assert.equal(h.db.prepare('SELECT stock FROM suppliers WHERE id=?').get(supplier.user.id).stock,4);
  }finally{await h.close();}});
+
+test('arrival estimates require order access and do not leak GPS to another customer',async()=>{
+ const h=await harness();try{
+ const customer=await h.register('routeCustomer'),stranger=await h.register('routeStranger'),{supplier}=await supplierReady(h,'routeSupplier');
+ const result=await h.request('/api/orders',{token:customer.token,headers:{'Idempotency-Key':'routing-privacy-test'},body:{type:'tanker',quantity:1000,city:'Harare',address:'12 Example Road',location:{latitude:-17.83,longitude:31.05},supplierId:supplier.user.id,paymentMethod:'cash'}});
+ assert.equal(result.status,201);const id=result.data.id;
+ assert.equal((await h.request(`/api/orders/${id}/route`)).status,401);
+ assert.equal((await h.request(`/api/orders/${id}/route`,{token:stranger.token})).status,403);
+ const own=await h.request(`/api/orders/${id}/route`,{token:customer.token});assert.equal(own.status,200);assert.equal(own.data.state,'unavailable');
+ let order=result.data;for(const action of ['accept','depart']){const next=await act(h,supplier,order,action);assert.equal(next.status,200);order=next.data;}
+ assert.equal((await h.request(`/api/orders/${id}/location`,{token:supplier.token,body:{latitude:-17.82,longitude:31.04,accuracy:15,capturedAt:Date.now()-180000}})).status,400);
+ assert.equal((await h.request(`/api/orders/${id}/location`,{token:supplier.token,body:{accuracy:15}})).status,400);
+ const location=await h.request(`/api/orders/${id}/location`,{token:supplier.token,body:{latitude:-17.82,longitude:31.04,accuracy:null,capturedAt:Date.now()}});assert.equal(location.status,200);assert.equal(location.data.driverLocation.accuracy,null);
+ assert.equal((await h.request(`/api/orders/${id}/route`,{token:customer.token})).data.state,'unavailable');
+ }finally{await h.close();}
+});
