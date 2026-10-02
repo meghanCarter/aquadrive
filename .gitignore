@@ -11,3 +11,6 @@ browser-runtime/
 source-draft/
 upload/
 deliverables/
+firebase-public/
+.firebase/
+**/*service-account*.json

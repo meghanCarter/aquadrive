@@ -1,0 +1,8 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // No client access until a tested authorization migration exists.
+    // Future server SDK access is governed separately by service-account IAM.
+    match /{document=**} { allow read, write: if false; }
+  }
+}
