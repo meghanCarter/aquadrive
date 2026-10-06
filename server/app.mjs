@@ -1,4 +1,5 @@
 import express from 'express';
+import {createFleet} from './fleet.mjs';
 import helmet from 'helmet';
 import cors from 'cors';
 import {rateLimit} from 'express-rate-limit';
@@ -18,7 +19,7 @@ const cityKey=value=>value.trim().replace(/\s+/g,' ').toLowerCase();
 const servesCity=(supplier,city)=>supplier.deliveryCities.some(value=>cityKey(value)===cityKey(city));
 function supplierData(row){const p=JSON.parse(row.profile);return {...p,headquartersCity:p.headquartersCity||p.city,deliveryCities:p.deliveryCities||[p.city],servicesDescription:p.servicesDescription||'',id:row.id,approved:!!row.approved&&row.approval_expires>Date.now(),approvalExpires:row.approval_expires,available:!!row.available,stock:row.stock};}
 export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite',config={},gateway}={}){
- const route=createRouting(config.routing);const db=openDb(dbPath);const app=express();const publicUrl=config.publicUrl||process.env.PUBLIC_URL||'http://localhost:4000';
+ const route=createRouting(config.routing);const db=openDb(dbPath);const app=express();const fleet=createFleet(db,{text,fail,now});const publicUrl=config.publicUrl||process.env.PUBLIC_URL||'http://localhost:4000';
  const configuredGateway=gateway||createGateway(publicUrl);const currency=config.currency||process.env.CURRENCY||'USD';
  if(!['USD','ZWG'].includes(currency))throw Error('CURRENCY must be USD or ZWG.');
  app.disable('x-powered-by');app.set('trust proxy',config.trustProxy??Number(process.env.TRUST_PROXY_HOPS||0));app.use(helmet());
@@ -28,10 +29,10 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
  app.use('/api',rateLimit({...limits,windowMs:60000,limit:240}));
  const authLimit=rateLimit({...limits,windowMs:15*60000,limit:20});
  app.use(express.json({limit:'8mb'}));
- const authenticated=(req,res,next)=>{try{const token=(req.headers.authorization||'').replace(/^Bearer /,'');if(!/^[a-f0-9]{64}$/.test(token))fail(401,'Sign in required.');const user=db.prepare('SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE token_hash=? AND expires_at>? AND disabled=0').get(tokenHash(token),Date.now());if(!user)fail(401,'Session expired. Sign in again.');req.user=user;req.token=token;next();}catch(e){next(e);}};
+ const authenticated=(req,res,next)=>{try{const token=(req.headers.authorization||'').replace(/^Bearer /,'');if(!/^[a-f0-9]{64}$/.test(token))fail(401,'Sign in required.');const user=db.prepare('SELECT users.* FROM sessions JOIN users ON users.id=sessions.user_id WHERE token_hash=? AND expires_at>? AND disabled=0').get(tokenHash(token),Date.now());if(!user)fail(401,'Session expired. Sign in again.');req.user=fleet.identity(user);req.token=token;next();}catch(e){next(e);}};
  const role=(...roles)=>(req,res,next)=>{if(!roles.includes(req.user.role))return next(Object.assign(new Error('Permission denied.'),{status:403}));next();};
  const wrap=fn=>(req,res,next)=>Promise.resolve().then(()=>fn(req,res)).catch(next);
- const getOrder=(id,user)=>{const row=db.prepare('SELECT * FROM orders WHERE id=?').get(id);if(!row)fail(404,'Order not found.');if(user.role!=='admin'&&row.customer_id!==user.id&&row.supplier_id!==user.id)fail(403,'Permission denied.');return {row,order:{...JSON.parse(row.data),version:row.version}};};
+ const getOrder=(id,user)=>{const row=db.prepare('SELECT * FROM orders WHERE id=?').get(id);if(!row)fail(404,'Order not found.');if(user.role!=='admin'&&row.customer_id!==user.id&&row.supplier_id!==user.id&&JSON.parse(row.data).driverId!==user.id)fail(403,'Permission denied.');return {row,order:{...JSON.parse(row.data),version:row.version}};};
  const event=(id,user,action)=>db.prepare('INSERT INTO events(order_id,actor_id,action,at) VALUES(?,?,?,?)').run(id,user.id,action,now());
  const saveOrder=(row,order,user,action)=>{const data={...order};delete data.version;db.prepare('UPDATE orders SET data=?,version=version+1 WHERE id=? AND version=?').run(JSON.stringify(data),row.id,row.version);event(row.id,user,action);return {...data,version:row.version+1};};
  const supplierOwn=user=>{const row=db.prepare('SELECT * FROM suppliers WHERE id=?').get(user.id);if(!row)fail(404,'Create your supplier profile first.');return row;};
@@ -41,14 +42,15 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
   const name=text(req.body.name,'Name',2,100),email=text(req.body.email,'Email',5,200).toLowerCase(),phone=text(req.body.phone,'Phone',8,30),password=text(req.body.password,'Password',12,128);
   if(!/^\S+@\S+\.\S+$/.test(email))fail(400,'Enter a valid email.');const userRole=req.body.role;if(!['customer','supplier'].includes(userRole))fail(400,'Only customer and supplier registration is allowed.');
   if(db.prepare('SELECT id FROM users WHERE email=?').get(email))fail(409,'Registration could not be completed. Use another email or sign in.');
+  const invitation=req.body.invitationCode?fleet.invite(req.body.invitationCode):null;if(invitation&&userRole!=='supplier')fail(400,'Driver accounts require a supplier invitation.');
   const id=randomUUID();const passwordHash=await hashPassword(password);
-  try{db.prepare('INSERT INTO users(id,name,email,phone,password_hash,role,created_at) VALUES(?,?,?,?,?,?,?)').run(id,name,email,phone,passwordHash,userRole,now());}catch(e){if(String(e).includes('UNIQUE'))fail(409,'Account already registered.');throw e;}
-  res.status(201).json({token:session(db,id),user:publicUser(db.prepare('SELECT * FROM users WHERE id=?').get(id))});
+  try{transaction(db,()=>{db.prepare('INSERT INTO users(id,name,email,phone,password_hash,role,created_at) VALUES(?,?,?,?,?,?,?)').run(id,name,email,phone,passwordHash,userRole,now());if(invitation)fleet.register(id,invitation);});}catch(e){if(String(e).includes('UNIQUE'))fail(409,'Account already registered.');throw e;}
+  res.status(201).json({token:session(db,id),user:publicUser(fleet.identity(db.prepare('SELECT * FROM users WHERE id=?').get(id)))});
  }));
  app.post('/api/auth/login',authLimit,wrap(async(req,res)=>{
   const email=text(req.body.email,'Email',5,200).toLowerCase(),password=text(req.body.password,'Password',1,128);const user=db.prepare('SELECT * FROM users WHERE email=? AND disabled=0').get(email);
   // Same expensive operation for unknown accounts reduces username timing leakage.
-  const valid=await verifyPassword(password,user?.password_hash||'a'.repeat(32)+':'+ '0'.repeat(128));if(!user||!valid)fail(401,'Incorrect email or password.');res.json({token:session(db,user.id),user:publicUser(user)});
+  const valid=await verifyPassword(password,user?.password_hash||'a'.repeat(32)+':'+ '0'.repeat(128));if(!user||!valid)fail(401,'Incorrect email or password.');res.json({token:session(db,user.id),user:publicUser(fleet.identity(user))});
  }));
  app.post('/api/auth/logout',authenticated,(req,res)=>{db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(req.token));res.json({ok:true});});
  app.get('/api/me',authenticated,(req,res)=>res.json(publicUser(req.user)));
@@ -96,7 +98,8 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
  app.get('/documents/view/:ticket',wrap((req,res)=>{
   const row=db.prepare('SELECT documents.* FROM document_tickets JOIN documents ON documents.id=document_tickets.document_id JOIN users ON users.id=document_tickets.user_id WHERE hash=? AND expires_at>? AND users.disabled=0').get(tokenHash(req.params.ticket),Date.now());if(!row)fail(404,'Link expired.');db.prepare('DELETE FROM document_tickets WHERE hash=?').run(tokenHash(req.params.ticket));res.set({'Content-Type':row.mime,'Content-Disposition':`attachment; filename="evidence.${row.mime==='application/pdf'?'pdf':row.mime==='image/png'?'png':'jpg'}"`,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}).send(Buffer.from(row.bytes));
  }));
- app.get('/api/orders',authenticated,(req,res)=>{let rows;if(req.user.role==='admin')rows=db.prepare('SELECT * FROM orders ORDER BY rowid DESC LIMIT 200').all();else rows=db.prepare('SELECT * FROM orders WHERE customer_id=? OR supplier_id=? ORDER BY rowid DESC LIMIT 200').all(req.user.id,req.user.id);res.json(rows.map(r=>({...JSON.parse(r.data),version:r.version})));});
+ fleet.mount(app,{authenticated,role,wrap,getOrder,saveOrder});
+ app.get('/api/orders',authenticated,(req,res)=>{let rows;if(req.user.role==='admin')rows=db.prepare('SELECT * FROM orders ORDER BY rowid DESC LIMIT 200').all();else if(req.user.role==='driver')rows=db.prepare("SELECT * FROM orders WHERE json_extract(data,'$.driverId')=? ORDER BY rowid DESC LIMIT 200").all(req.user.id);else rows=db.prepare('SELECT * FROM orders WHERE customer_id=? OR supplier_id=? ORDER BY rowid DESC LIMIT 200').all(req.user.id,req.user.id);res.json(rows.map(r=>({...JSON.parse(r.data),version:r.version})));});
  app.get('/api/orders/:id',authenticated,wrap((req,res)=>res.json(getOrder(req.params.id,req.user).order)));
  app.get('/api/orders/:id/route',authenticated,wrap(async(req,res)=>{const {order}=getOrder(req.params.id,req.user);res.set('Cache-Control','no-store').json(await route(order));}));
  app.post('/api/orders',authenticated,role('customer'),wrap((req,res)=>{
@@ -110,17 +113,18 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
  }));
  app.post('/api/orders/:id/action',authenticated,wrap((req,res)=>{
   const result=transaction(db,()=>{const {row,order}=getOrder(req.params.id,req.user);const {action,version}=req.body;if(version!==row.version)fail(409,'Order changed. Refresh before trying again.');const supplier=req.user.id===row.supplier_id,customer=req.user.id===row.customer_id;
+   const driver=order.driverId===req.user.id,operator=order.driverId?driver:supplier;
    const transition={accept:['Requested','Accepted'],depart:['Accepted','On the way'],arrive:['On the way','Arrived']};
-   if(transition[action]){if(!supplier)fail(403,'Only the assigned supplier can update delivery.');const [from,to]=transition[action];if(order.status!==from)fail(409,'Invalid delivery transition.');if(action==='accept'){const s=supplierData(supplierOwn(req.user));if(!s.approved)fail(403,'Supplier approval is required.');const busy=db.prepare('SELECT data FROM orders WHERE supplier_id=? AND id<>?').all(req.user.id,row.id).some(r=>['Accepted','On the way','Arrived'].includes(JSON.parse(r.data).status));if(busy)fail(409,'Complete your current delivery before accepting another.');}order.status=to;}
+   if(transition[action]){if(action==='accept'?!(supplier||driver):!operator)fail(403,'Only the assigned driver can update this delivery.');const [from,to]=transition[action];if(order.status!==from)fail(409,'Invalid delivery transition.');if(action==='accept'){const s=supplierData(db.prepare('SELECT * FROM suppliers WHERE id=?').get(row.supplier_id));if(!s.approved)fail(403,'Supplier approval is required.');if(!order.driverId&&db.prepare('SELECT user_id FROM drivers WHERE company_id=? LIMIT 1').get(row.supplier_id))fail(409,'Assign a driver and vehicle before accepting.');const busy=db.prepare('SELECT data FROM orders WHERE supplier_id=? AND id<>?').all(row.supplier_id,row.id).some(r=>{const o=JSON.parse(r.data);return ['Accepted','On the way','Arrived'].includes(o.status)&&(order.driverId?(o.driverId===order.driverId||o.vehicleId===order.vehicleId):!o.driverId);});if(busy)fail(409,'Complete your current delivery before accepting another.');}order.status=to;}
    else if(action==='cancel'||action==='decline'){if(action==='cancel'&&!customer)fail(403,'Only the customer can cancel.');if(action==='decline'&&!supplier)fail(403,'Only the assigned supplier can decline.');if(!['Requested','Accepted'].includes(order.status))fail(409,'Delivery has started. Contact support.');order.status=action==='cancel'?'Cancelled':'Declined';order.reason=text(req.body.reason,'Reason',3,300);db.prepare('UPDATE suppliers SET stock=stock+? WHERE id=?').run(order.quantity,row.supplier_id);}
    else if(action==='receive'){if(!customer)fail(403,'Only the customer can confirm receipt.');if(order.status!=='Arrived')fail(409,'Supplier must mark arrival first.');order.status='Delivered';}
-   else if(action==='cash'){if(!supplier||order.paymentMethod!=='cash')fail(403,'Only the supplier can record cash collection.');if(order.status!=='Delivered'||order.paymentStatus==='Paid')fail(409,'Cash collection requires an unpaid completed delivery.');order.paymentStatus='Paid';order.paidAt=now();order.paymentReference='CASH';}
+   else if(action==='cash'){if(!(supplier||driver)||order.paymentMethod!=='cash')fail(403,'Only the supplier can record cash collection.');if(order.status!=='Delivered'||order.paymentStatus==='Paid')fail(409,'Cash collection requires an unpaid completed delivery.');order.paymentStatus='Paid';order.paidAt=now();order.paymentReference='CASH';}
    else if(action==='rate'){if(!customer||order.status!=='Delivered')fail(403,'Rate only your completed delivery.');order.rating=integer(req.body.rating,'rating',1,5);}
    else fail(400,'Unknown order action.');order.updatedAt=now();return saveOrder(row,order,req.user,action);
   });res.json(result);
  }));
- app.post('/api/orders/:id/location',authenticated,role('supplier'),wrap((req,res)=>{
-  const result=transaction(db,()=>{const {row,order}=getOrder(req.params.id,req.user);if(row.supplier_id!==req.user.id)fail(403,'Permission denied.');if(!['On the way','Arrived'].includes(order.status))fail(409,'Location sharing is only available during delivery.');const location=coordinate(req.body);if(!location)fail(400,'GPS coordinates are required.');const captured=req.body.capturedAt===undefined?Date.now():number(req.body.capturedAt,'GPS timestamp',0,Date.now()+30000);if(Date.now()-captured>120000)fail(400,'GPS reading is too old.');if(order.driverLocation&&captured<Date.parse(order.driverLocation.at))fail(409,'A newer GPS reading is already stored.');order.driverLocation={...location,accuracy:req.body.accuracy==null?null:number(req.body.accuracy,'accuracy',0,100000),at:new Date(captured).toISOString()};return saveOrder(row,order,req.user,'location');});res.json(result);
+ app.post('/api/orders/:id/location',authenticated,role('supplier','driver'),wrap((req,res)=>{
+  const result=transaction(db,()=>{const {row,order}=getOrder(req.params.id,req.user);if((order.driverId||row.supplier_id)!==req.user.id)fail(403,'Only the assigned driver can share GPS.');if(!['On the way','Arrived'].includes(order.status))fail(409,'Location sharing is only available during delivery.');const location=coordinate(req.body);if(!location)fail(400,'GPS coordinates are required.');const captured=req.body.capturedAt===undefined?Date.now():number(req.body.capturedAt,'GPS timestamp',0,Date.now()+30000);if(Date.now()-captured>120000)fail(400,'GPS reading is too old.');if(order.driverLocation&&captured<Date.parse(order.driverLocation.at))fail(409,'A newer GPS reading is already stored.');order.driverLocation={...location,accuracy:req.body.accuracy==null?null:number(req.body.accuracy,'accuracy',0,100000),at:new Date(captured).toISOString()};return saveOrder(row,order,req.user,'location');});res.json(result);
  }));
  app.get('/api/orders/:id/events',authenticated,wrap((req,res)=>{getOrder(req.params.id,req.user);res.json(db.prepare('SELECT action,at FROM events WHERE order_id=? ORDER BY id').all(req.params.id));}));
  app.post('/api/orders/:id/pay/ecocash',authenticated,role('customer'),wrap(async(req,res)=>{

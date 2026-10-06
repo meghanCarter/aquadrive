@@ -118,3 +118,24 @@ test('supplier coverage separates headquarters from delivery cities and checks o
  assert.equal((await place(h,customer,supplier,randomUUID(),{city:'Gweru'})).status,201);
  assert.equal((await place(h,customer,supplier,randomUUID(),{city:'Harare'})).status,409);
  }finally{await h.close();}});
+
+test('company drivers join by single-use invitation and only assigned drivers access orders or upload GPS',async()=>{const h=await harness();try{
+ const customer=await h.register('fleetBuyer');const {supplier:company}=await supplierReady(h,'fleetCompany');const {supplier:otherCompany}=await supplierReady(h,'otherCompany');
+ const enroll=async(name,owner)=>{const invitation=await h.request('/api/company/driver-invites',{token:owner.token,body:{}});assert.equal(invitation.status,201);const body={name,email:`${name}@example.com`,phone:'0771234567',password,role:'supplier',invitationCode:invitation.data.code};const joined=await h.request('/api/auth/register',{body});assert.equal(joined.status,201);assert.equal(joined.data.user.role,'driver');assert.equal((await h.request('/api/auth/register',{body:{...body,email:`repeat-${name}@example.com`}})).status,400);return joined.data;};
+ const a=await enroll('DriverOne',company),b=await enroll('DriverTwo',company),outsider=await enroll('OutsideDriver',otherCompany);
+ assert.equal((await h.request('/api/supplier/profile',{token:a.token,body:{},method:'PUT'})).status,403);
+ assert.equal((await h.request('/api/company/driver-invites',{token:a.token,body:{}})).status,403);
+ const vehicle=await h.request('/api/company/vehicles',{token:company.token,body:{description:'Blue tanker truck',registration:'ABC1234'}});assert.equal(vehicle.status,201);
+ const vehicle2=await h.request('/api/company/vehicles',{token:company.token,body:{description:'White tanker truck',registration:'ABC5678'}});assert.equal(vehicle2.status,201);
+ let order=(await place(h,customer,company)).data;assert.equal((await act(h,company,order,'accept')).status,409);
+ const assign=async(o,d,v,owner=company)=>h.request(`/api/orders/${o.id}/assign`,{token:owner.token,body:{driverId:d.user.id,vehicleId:v.data.id,version:o.version}});
+ assert.equal((await assign(order,outsider,vehicle)).status,400);assert.equal((await assign(order,a,vehicle,otherCompany)).status,403);
+ const assigned=await assign(order,a,vehicle);assert.equal(assigned.status,200);order=assigned.data;assert.equal(order.driverName,'DriverOne');assert.equal(order.vehicleRegistration,'ABC1234');
+ assert.equal((await h.request(`/api/orders/${order.id}`,{token:b.token})).status,403);assert.equal((await h.request(`/api/orders/${order.id}/route`,{token:outsider.token})).status,403);assert.equal((await h.request('/api/orders',{token:a.token})).data.length,1);assert.equal((await h.request('/api/orders',{token:b.token})).data.length,0);
+ order=(await act(h,company,order,'accept')).data;
+ const second=(await place(h,customer,company)).data;assert.equal((await assign(second,a,vehicle2)).status,409);assert.equal((await assign(second,b,vehicle)).status,409);
+ const secondAssigned=await assign(second,b,vehicle2);assert.equal(secondAssigned.status,200);assert.equal((await act(h,company,secondAssigned.data,'accept')).status,200);
+ assert.equal((await act(h,company,order,'depart')).status,403);order=(await act(h,a,order,'depart')).data;assert.equal(order.status,'On the way');assert.equal((await assign(order,b,vehicle2)).status,409);
+ const gps={latitude:-17.82,longitude:31.05,accuracy:5};assert.equal((await h.request(`/api/orders/${order.id}/location`,{token:company.token,body:gps})).status,403);assert.equal((await h.request(`/api/orders/${order.id}/location`,{token:b.token,body:gps})).status,403);
+ const located=await h.request(`/api/orders/${order.id}/location`,{token:a.token,body:gps});assert.equal(located.status,200);order=located.data;order=(await act(h,a,order,'arrive')).data;order=(await act(h,customer,order,'receive')).data;assert.equal((await act(h,a,order,'cash')).status,200);
+ }finally{await h.close();}});
