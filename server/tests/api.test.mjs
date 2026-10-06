@@ -104,3 +104,17 @@ test('arrival estimates require order access and do not leak GPS to another cust
  assert.equal((await h.request(`/api/orders/${id}/route`,{token:customer.token})).data.state,'unavailable');
  }finally{await h.close();}
 });
+
+test('supplier coverage separates headquarters from delivery cities and checks orders',async()=>{const h=await harness();try{
+ const customer=await h.register('coverageBuyer');const {supplier,profile}=await supplierReady(h,'coverageSupplier');
+ const updated={...profile,headquartersCity:'Harare',servicesDescription:'Bulk water for homes and construction sites',deliveryCities:[' Gweru ','gweru','Kwekwe']};
+ const saved=await h.request('/api/supplier/profile',{token:supplier.token,body:updated,method:'PUT'});assert.equal(saved.status,200);assert.deepEqual(saved.data.deliveryCities,['Gweru','Kwekwe']);assert.equal(saved.data.headquartersCity,'Harare');assert.equal(saved.data.approved,false);
+ for(const deliveryCities of [[],[''],['Gweru',123],Array(31).fill('Gweru')])assert.equal((await h.request('/api/supplier/profile',{token:supplier.token,body:{...updated,deliveryCities},method:'PUT'})).status,400);
+ assert.equal((await h.request('/api/supplier/profile',{token:supplier.token,body:{...updated,servicesDescription:''},method:'PUT'})).status,400);
+ await h.request(`/api/admin/suppliers/${supplier.user.id}`,{token:h.admin.token,method:'PATCH',body:{approved:true,note:'Coverage evidence reviewed for testing'}});
+ assert.equal((await h.request('/api/suppliers?city=GW ERU',{token:customer.token})).data.length,0);
+ const matches=await h.request('/api/suppliers?city=%20gWeRu%20&type=tanker&quantity=1000',{token:customer.token});assert.equal(matches.data.length,1);assert.equal(matches.data[0].servicesDescription,updated.servicesDescription);
+ assert.equal((await h.request('/api/suppliers?city=Harare',{token:customer.token})).data.length,0);
+ assert.equal((await place(h,customer,supplier,randomUUID(),{city:'Gweru'})).status,201);
+ assert.equal((await place(h,customer,supplier,randomUUID(),{city:'Harare'})).status,409);
+ }finally{await h.close();}});
