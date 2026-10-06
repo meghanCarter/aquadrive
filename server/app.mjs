@@ -14,7 +14,9 @@ const number=(value,label,min,max)=>{if(typeof value!=='number'||!Number.isFinit
 const integer=(value,label,min,max)=>{number(value,label,min,max);if(!Number.isInteger(value))fail(400,`${label} must be a whole number.`);return value;};
 const choices={tanker:[1000,2500,5000,10000],bottled:[1,2,4,8,12,24]};
 const coordinate=(value)=>{if(value===null||value===undefined)return null;return {latitude:number(value.latitude,'latitude',-90,90),longitude:number(value.longitude,'longitude',-180,180)};};
-function supplierData(row){return {...JSON.parse(row.profile),id:row.id,approved:!!row.approved&&row.approval_expires>Date.now(),approvalExpires:row.approval_expires,available:!!row.available,stock:row.stock};}
+const cityKey=value=>value.trim().replace(/\s+/g,' ').toLowerCase();
+const servesCity=(supplier,city)=>supplier.deliveryCities.some(value=>cityKey(value)===cityKey(city));
+function supplierData(row){const p=JSON.parse(row.profile);return {...p,headquartersCity:p.headquartersCity||p.city,deliveryCities:p.deliveryCities||[p.city],servicesDescription:p.servicesDescription||'',id:row.id,approved:!!row.approved&&row.approval_expires>Date.now(),approvalExpires:row.approval_expires,available:!!row.available,stock:row.stock};}
 export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite',config={},gateway}={}){
  const route=createRouting(config.routing);const db=openDb(dbPath);const app=express();const publicUrl=config.publicUrl||process.env.PUBLIC_URL||'http://localhost:4000';
  const configuredGateway=gateway||createGateway(publicUrl);const currency=config.currency||process.env.CURRENCY||'USD';
@@ -54,12 +56,17 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
  app.get('/api/suppliers',authenticated,(req,res)=>{
   const service=req.query.type,qty=Number(req.query.quantity),city=(req.query.city||'').toString().trim().toLowerCase();
   const rows=db.prepare('SELECT * FROM suppliers WHERE approved=1 AND approval_expires>? AND available=1').all(Date.now());
-  res.json(rows.map(supplierData).filter(s=>(!service||s.type===service)&&(!qty||(qty<=s.capacity&&qty<=s.stock))&&(!city||s.city.toLowerCase()===city)).map(s=>{const {documentId,approvalNote,...publicProfile}=s;return {...publicProfile,quoteCents:qty?Math.round(qty*s.rateMicros/10000)+s.deliveryCents:null,currency};}));
+  res.json(rows.map(supplierData).filter(s=>(!service||s.type===service)&&(!qty||(qty<=s.capacity&&qty<=s.stock))&&(!city||servesCity(s,city))).map(s=>{const {documentId,approvalNote,...publicProfile}=s;return {...publicProfile,quoteCents:qty?Math.round(qty*s.rateMicros/10000)+s.deliveryCents:null,currency};}));
  });
  app.get('/api/supplier/profile',authenticated,role('supplier'),(req,res)=>{const row=db.prepare('SELECT * FROM suppliers WHERE id=?').get(req.user.id);res.json(row?supplierData(row):null);});
  app.put('/api/supplier/profile',authenticated,role('supplier'),wrap((req,res)=>{
   const b=req.body,type=b.type;if(!choices[type])fail(400,'Choose tanker or bottled water.');
-  const profile={businessName:text(b.businessName,'Business name',2,120),type,city:text(b.city,'City',2,80),serviceArea:text(b.serviceArea,'Service area',3,200),waterSource:text(b.waterSource,'Water source',3,300),vehicle:text(b.vehicle,'Vehicle/registration',2,100),capacity:integer(b.capacity,'capacity',1,100000),rateMicros:integer(b.rateMicros,'unit rate',1,100000000),deliveryCents:integer(b.deliveryCents,'delivery fee',0,1000000),contactPhone:req.user.phone,documentId:b.documentId||null};
+  const headquartersCity=text(b.headquartersCity??b.city,'Headquarters city',2,80);
+  const rawCities=b.deliveryCities??[headquartersCity];if(!Array.isArray(rawCities)||rawCities.length<1||rawCities.length>30)fail(400,'Enter between 1 and 30 delivery cities.');
+  const cleanedCities=rawCities.map(value=>text(value,'Delivery city',2,80).replace(/\s+/g,' '));
+  const deliveryCities=cleanedCities.filter((city,index)=>cleanedCities.findIndex(value=>cityKey(value)===cityKey(city))===index);
+  const servicesDescription=b.servicesDescription===undefined?'':text(b.servicesDescription,'Services offered',10,1000);
+  const profile={headquartersCity,deliveryCities,servicesDescription,businessName:text(b.businessName,'Business name',2,120),type,city:headquartersCity,serviceArea:text(b.serviceArea,'Service area',3,200),waterSource:text(b.waterSource,'Water source',3,300),vehicle:text(b.vehicle,'Vehicle/registration',2,100),capacity:integer(b.capacity,'capacity',1,100000),rateMicros:integer(b.rateMicros,'unit rate',1,100000000),deliveryCents:integer(b.deliveryCents,'delivery fee',0,1000000),contactPhone:req.user.phone,documentId:b.documentId||null};
   if(profile.documentId){const doc=db.prepare('SELECT id FROM documents WHERE id=? AND owner_id=?').get(profile.documentId,req.user.id);if(!doc)fail(400,'Invalid verification document.');}
   const stock=integer(b.stock,'stock',0,1000000);const previous=db.prepare('SELECT * FROM suppliers WHERE id=?').get(req.user.id);
   if(previous){const previousProfile=JSON.parse(previous.profile);const activeOrders=db.prepare('SELECT data FROM orders WHERE supplier_id=?').all(req.user.id).map(r=>JSON.parse(r.data)).filter(o=>!['Delivered','Cancelled','Declined'].includes(o.status));if(activeOrders.length&&(previousProfile.type!==type||previousProfile.capacity!==profile.capacity))fail(409,'Service type and capacity cannot change while orders are active.');}
@@ -96,7 +103,7 @@ export function createApp({dbPath=process.env.DB_PATH||'./data/aquadrive.sqlite'
   const b=req.body,key=text(req.headers['idempotency-key'],'Order request key',8,100);const previous=db.prepare('SELECT * FROM orders WHERE customer_id=? AND idempotency_key=?').get(req.user.id,key);if(previous)return res.json({...JSON.parse(previous.data),version:previous.version});
   const type=b.type,quantity=b.quantity;if(!choices[type]?.includes(quantity))fail(400,'Invalid water quantity.');const address=text(b.address,'Delivery address',8,300),city=text(b.city,'City',2,80);const location=coordinate(b.location);if(!['cash','ecocash'].includes(b.paymentMethod))fail(400,'Invalid payment method.');if(b.paymentMethod==='ecocash'&&!configuredGateway)fail(503,'EcoCash is not configured. Choose cash.');
   const order=transaction(db,()=>{
-   const row=db.prepare('SELECT * FROM suppliers WHERE id=?').get(b.supplierId);if(!row)fail(404,'Supplier not found.');const s=supplierData(row);if(!s.approved||!s.available||s.type!==type||s.city.toLowerCase()!==city.toLowerCase()||s.capacity<quantity||s.stock<quantity)fail(409,'Supplier no longer available for this order.');
+   const row=db.prepare('SELECT * FROM suppliers WHERE id=?').get(b.supplierId);if(!row)fail(404,'Supplier not found.');const s=supplierData(row);if(!s.approved||!s.available||s.type!==type||!servesCity(s,city)||s.capacity<quantity||s.stock<quantity)fail(409,'Supplier no longer available for this order.');
    const totalCents=Math.round(quantity*s.rateMicros/10000)+s.deliveryCents;const order={id:`AQ-${randomUUID()}`,customerId:req.user.id,customer:req.user.name,customerPhone:req.user.phone,address,city,location,type,quantity,supplierId:s.id,supplierName:s.businessName,supplierPhone:s.contactPhone,unitRateMicros:s.rateMicros,deliveryCents:s.deliveryCents,totalCents,currency,paymentMethod:b.paymentMethod,paymentStatus:'Unpaid',status:'Requested',createdAt:now(),updatedAt:now(),driverLocation:null};
    db.prepare('INSERT INTO orders(id,customer_id,supplier_id,idempotency_key,data) VALUES(?,?,?,?,?)').run(order.id,req.user.id,s.id,key,JSON.stringify(order));db.prepare('UPDATE suppliers SET stock=stock-? WHERE id=?').run(quantity,s.id);event(order.id,req.user,'Requested');return {...order,version:1};
   });res.status(201).json(order);
