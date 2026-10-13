@@ -12,7 +12,7 @@ Decision (12 October 2026): keep the $0 hosting budget. Use Render free compute 
 - Server tools create full SQLite backups and migrate an existing SQLite database into an empty destination atomically. Full backups contain secrets and require secure handling.
 - Optional one-time admin provisioning uses server-only ADMIN_EMAIL and ADMIN_PASSWORD. Existing non-admin identities are never silently promoted. Remove bootstrap credentials after success.
 
-## Activation still required
+## Activation procedure
 1. Create a Turso free account and an `aquadrive` database. Stay on the free plan; do not enable paid overages. Obtain its URL and database token.
 2. Preserve existing Render data before any restart/deploy. Free Render has no persistent disk or ordinary shell access. Current live rows and any old backup availability have not been verified. Do not assume local development data is the live database. If the live file cannot be recovered, explicitly agree on a fresh database and acknowledge lost demo records before cutover.
 3. In a trusted server environment run `npm run migrate -- /path/to/source.sqlite` against the empty destination if a source exists. Validate record counts, document bytes and foreign keys. Large migrations may need operational tooling; failures roll back rather than partially import.
@@ -31,4 +31,6 @@ The database provider's private console is for operator SQL/schema management. T
 
 Validation: 22 backend tests passed, including admin access denials for customers, suppliers and drivers; migration/backup checks; concurrent retries; and guarded admin provisioning. Mobile lint, typecheck and Android JavaScript export passed.
 
-Status: code prepared and locally tested; production Turso credentials, preservation/cutover, remote restart verification and rebuilt APK remain outstanding. Never label this live permanent storage until those checks pass.
+Status update, 13 October 2026: user explicitly chose an empty database; old demo records were not migrated. Turso-backed release 64c771fb072b18d8aca75125506875e472bef3fc is live on Render (deploy dep-db6tmtk9v7es739pmdqg). The server provisioned an administrator, and bootstrap ADMIN_EMAIL/ADMIN_PASSWORD were cleared afterwards. Health returned 200, unauthenticated admin access returned 401, customer admin access returned 403, and one Storage verification (test) account plus its session survived two full redeploys. The obsolete temporary-storage warning was removed. The designated admin email is mickeljohnson406@gmail.com; owner login still needs user confirmation.
+
+Remaining: rebuilt Android APK, scheduled protected backups and cloud restore validation, phone/GPS testing and configured live payment/routing verification. One clearly named verification customer account remains; it is not a real customer.
