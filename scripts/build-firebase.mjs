@@ -1,0 +1,18 @@
+import {spawnSync} from 'node:child_process';
+import {cpSync,mkdirSync,readFileSync,writeFileSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+import {mapHtml,mapScript} from '../server/maps.mjs';
+const root=fileURLToPath(new URL('../',import.meta.url));
+const api=process.env.EXPO_PUBLIC_API_URL;
+if(!api||!api.startsWith('https://'))throw Error('Set EXPO_PUBLIC_API_URL to the approved HTTPS backend before building.');
+const parsed=new URL(api);if(parsed.pathname!=='/'||parsed.search||parsed.hash||parsed.username||parsed.password)throw Error('EXPO_PUBLIC_API_URL must be a plain HTTPS origin.');
+const result=spawnSync('npx',['expo','export','--platform','web','--output-dir','../firebase-public'],{cwd:root+'aquadrive',env:{...process.env,EXPO_OFFLINE:'1'},stdio:'inherit'});
+if(result.status!==0)process.exit(result.status||1);
+mkdirSync(root+'firebase-public/map-assets',{recursive:true});
+cpSync(root+'server/node_modules/leaflet/dist',root+'firebase-public/map-assets',{recursive:true});
+writeFileSync(root+'firebase-public/tracking-map.html',mapHtml);
+writeFileSync(root+'firebase-public/tracking-map.js',mapScript);
+const path=root+'firebase-public/index.html';
+let html=readFileSync(path,'utf8');
+if(process.env.RELEASE_READY!=='yes')html=html.replace('<body>','<body><div style="background:#9a3412;color:white;padding:10px;text-align:center;font:13px sans-serif">AQUADRIVE — Pre-release review. Use fictional details. Production storage and phone testing are not yet verified.</div>');
+writeFileSync(path,html);
