@@ -2,15 +2,15 @@
 
 A mobile client and persistent API for water delivery. Supports tanker water and 20 litre bottles, separate customer/supplier/admin accounts, server-calculated quotes, stock reservations, supplier approval, delivery transitions, foreground and native background GPS sharing, cash receipts and a configurable EcoCash adapter through Paynow.
 
-**Status:** a free pilot demo exists at https://aquadrive-demo.onrender.com. The latest interface and tracking changes are locally validated and require publication. No signed APK or live EcoCash transaction has been verified. Free-demo data can disappear on restart.
+**Status (13 October 2026):** AQUADRIVE is the live application, backed by Turso storage. The administrator/database and company-fleet release is deployed, and a verification account/session survived two redeploys. The existing hosting address is https://aquadrive-demo.onrender.com; the address still contains the old service name and is pending a hosting rename. It does not describe the current database as temporary. The updated APK, scheduled backups/restoration, physical-phone GPS checks and configured live EcoCash verification remain outstanding.
 
 ## Contents
 
 - `aquadrive/`: Expo SDK 57 mobile client using Expo Router.
-- `server/`: Node.js 24 API with a persistent SQLite database.
+- `server/`: Node.js 24 API using Turso/libSQL for live storage and local SQLite for development.
 - `server/public/`: generated web build, served by the API after export (not committed).
 - `Dockerfile`: combined web/API deployment build.
-- `render.yaml`: single-instance paid Render service and a 1 GB persistent disk.
+- `render.yaml`: free Render compute with external Turso storage; the name matches the current hosting service until its rename is verified.
 - `DEPLOYMENT.md`: hosting, administrator and payment configuration.
 - `VALIDATION.md`: completed checks and limitations.
 
@@ -50,10 +50,10 @@ Administrator signup is deliberately unavailable. Approval is an operational rev
 
 - Supplier matches require city, service, approval, availability, vehicle capacity and stock.
 - Stock is reserved when an order is requested, and restored once on cancellation or decline.
-- One supplier account represents one vehicle and one water service. It can have only one accepted/active delivery at a time.
+- A supplier company has one priced water-service profile and can manage multiple invited drivers and vehicles. Distinct available driver/vehicle pairs can handle concurrent deliveries.
 - Supplier accepts and updates delivery. Only the customer can confirm receipt.
 - Cancellation/decline is available before departure. Afterwards, support must handle disputes manually.
-- Only the assigned supplier can record cash collection after the customer confirms receipt.
+- The company manager or assigned driver can record cash collection after customer receipt confirmation.
 - EcoCash is disabled unless server-side merchant credentials exist. It is initiated after completed delivery, so there is no prepayment-refund path for cancelled deliveries in this version.
 - Payment attempts are saved before contacting the gateway. Unknown or rejected attempts require operator investigation rather than an automatic second debit.
 - Gateway confirmation verifies its signature, merchant reference and amount. Webhooks are confirmed by polling the stored gateway URL. Disputed/refunded states can be reconciled.
