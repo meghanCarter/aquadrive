@@ -5,9 +5,9 @@ export function createGateway(publicUrl){
  const paynow=new Paynow(process.env.PAYNOW_INTEGRATION_ID,process.env.PAYNOW_INTEGRATION_KEY);
  paynow.resultUrl=`${publicUrl}/payments/paynow`;paynow.returnUrl=`${publicUrl}/payments/return`;
  return {
-  async initiate({reference,email,phone,totalCents,currency}){
+  async initiate({reference,email,phone,totalCents,currency,description}){
    if(currency!==(process.env.PAYNOW_CURRENCY||'USD'))throw Error('Merchant currency does not match order currency.');
-   const payment=paynow.createPayment(reference,email);payment.add('AQUADRIVE water delivery',totalCents/100);
+   const payment=paynow.createPayment(reference,email);payment.add(description||'AQUADRIVE water delivery',totalCents/100);
    const normalized=phone.replace(/^\+?263/,'0');return bounded(paynow.sendMobile(payment,normalized,'ecocash'));
   },
   async poll(url){

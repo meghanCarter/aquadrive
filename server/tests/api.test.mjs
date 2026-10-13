@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createApp } from '../app.mjs';
 import { hashPassword, session } from '../auth.mjs';
 const password = 'AquaTestPassword2026!';
-async function harness(gateway) {
+async function harness(gateway,walletFundingEnabled=false) {
   const {
     app,
     db
@@ -15,7 +15,7 @@ async function harness(gateway) {
     dbPath: ':memory:',
     gateway,
     config: {
-      publicUrl: 'http://localhost:4000'
+      publicUrl: 'http://localhost:4000',walletFundingEnabled
     }
   });
   const server = app.listen(0, '127.0.0.1');
@@ -849,3 +849,77 @@ test('admin database access, pagination, sanitized exports and audited account c
  }finally{await h.close();}});
 
 test('concurrent order retries reserve stock once after async database conversion',async()=>{const h=await harness();try{const customer=await h.register('concurrent-buyer');const {supplier}=await supplierReady(h,'concurrent-company');const key=randomUUID();const results=await Promise.all([place(h,customer,supplier,key),place(h,customer,supplier,key)]);for(const r of results)assert.ok([200,201].includes(r.status));assert.equal(results[0].data.id,results[1].data.id);assert.equal((await h.db.prepare('SELECT stock FROM suppliers WHERE id=?').get(supplier.user.id)).stock,19000);}finally{await h.close();}});
+
+test('saved addresses and preferences are private, versioned and survive account updates',async()=>{const h=await harness();try{const a=await h.register('settings-a'),b=await h.register('settings-b'),company=await h.register('settings-company','supplier');
+ const defaults=await h.request('/api/account/preferences',{token:a.token});assert.equal(defaults.data.version,0);
+ let result=await h.request('/api/account/preferences',{token:a.token,method:'PUT',body:{version:0,preferences:{appearance:'dark',largerText:true,contactMethod:'message',deliveryInstructions:'Call at the gate'}}});assert.equal(result.status,200);assert.equal(result.data.version,1);
+ assert.equal((await h.request('/api/account/preferences',{token:a.token,method:'PUT',body:{version:0,preferences:{appearance:'light'}}})).status,409);
+ assert.equal((await h.request('/api/account/preferences',{token:b.token})).data.preferences.appearance,'system');
+ assert.equal((await h.request('/api/account/preferences',{token:b.token,method:'PUT',body:{version:0,preferences:{role:'admin'}}})).status,400);
+ const address={label:'home',city:'Harare',address:'14 Test Road, Harare',instructions:'Tank behind the house',location:{latitude:-17.8,longitude:31.0}};
+ result=await h.request('/api/account/addresses',{token:a.token,body:address});assert.equal(result.status,201);const saved=result.data;
+ assert.equal((await h.request('/api/account/addresses',{token:company.token,body:address})).status,403);
+ assert.equal((await h.request('/api/account/addresses',{token:b.token})).data.length,0);
+ assert.equal((await h.request(`/api/account/addresses/${saved.id}`,{token:b.token,method:'PATCH',body:{version:1,archived:true}})).status,404);
+ assert.equal((await h.request('/api/account/addresses',{token:a.token,body:address})).status,409);
+ result=await h.request(`/api/account/addresses/${saved.id}`,{token:a.token,method:'PATCH',body:{version:1,archived:true}});assert.equal(result.status,200);assert.equal(result.data.archived,true);
+ result=await h.request(`/api/account/addresses/${saved.id}`,{token:a.token,method:'PATCH',body:{version:2,archived:false}});assert.equal(result.status,200);assert.equal(result.data.location.latitude,-17.8);
+ const exported=await h.request('/api/account/data-export',{token:a.token,body:{}});assert.equal(exported.data.addresses.length,1);assert.ok(!JSON.stringify(exported.data).includes('password_hash'));assert.ok(!JSON.stringify(exported.data).includes(a.token));
+ }finally{await h.close();}});
+
+test('delivery conversations enforce order access and deduplicate send retries',async()=>{const h=await harness();try{const customer=await h.register('chat-buyer'),outsider=await h.register('chat-outsider');const {supplier}=await supplierReady(h,'chat-company');const order=(await place(h,customer,supplier)).data;const key=randomUUID();
+ const req={token:customer.token,body:{body:'Please use the side gate'},headers:{'Idempotency-Key':key}};assert.equal((await h.request(`/api/orders/${order.id}/messages`,req)).status,201);assert.equal((await h.request(`/api/orders/${order.id}/messages`,req)).status,201);
+ let result=await h.request(`/api/orders/${order.id}/messages`,{token:supplier.token});assert.equal(result.data.rows.length,1);assert.equal(result.data.rows[0].sender_name,customer.user.name);
+ assert.equal((await h.request(`/api/orders/${order.id}/messages`,{token:outsider.token})).status,403);assert.equal((await h.request(`/api/orders/${order.id}/messages`,{token:outsider.token,body:{body:'Intrusion'},headers:{'Idempotency-Key':randomUUID()}})).status,403);
+ const another=(await place(h,customer,supplier)).data;assert.equal((await h.request(`/api/orders/${another.id}/messages`,req)).status,409);
+ await act(h,customer,order,'cancel',{reason:'No longer needed'});assert.equal((await h.request(`/api/orders/${order.id}/messages`,{...req,headers:{'Idempotency-Key':randomUUID()}})).status,409);
+ }finally{await h.close();}});
+
+test('support replies and free membership have durable role boundaries',async()=>{const h=await harness();try{const a=await h.register('support-a'),b=await h.register('support-b');
+ const result=await h.request('/api/account/support',{token:a.token,body:{category:'account',body:'I need help changing my account details'}});assert.equal(result.status,201);
+ assert.equal((await h.request('/api/account/support',{token:b.token})).data.length,0);
+ assert.equal((await h.request(`/api/admin/support/${result.data.id}`,{token:b.token,method:'PATCH',body:{reply:'Not allowed',status:'Resolved'}})).status,403);
+ assert.equal((await h.request(`/api/admin/support/${result.data.id}`,{token:h.admin.token,method:'PATCH',body:{reply:'Please provide the corrected phone number through account support.',status:'Resolved'}})).status,200);
+ assert.equal((await h.request('/api/account/support',{token:a.token})).data[0].status,'Resolved');
+ assert.equal((await h.request('/api/account/membership',{token:a.token,body:{active:true}})).data.priceCents,0);assert.equal((await h.request('/api/account/membership',{token:a.token})).data.status,'Active');assert.equal((await h.request('/api/account/membership',{token:b.token})).data.status,'Not joined');assert.equal((await h.request('/api/account/membership',{token:a.token,body:{active:false}})).data.status,'Inactive');
+ }finally{await h.close();}});
+
+test('wallet funding is opt-in, verified once, isolated and reversed once',async()=>{let calls=0,paid=false,status='Pending',reference='',amount=0;const gateway={initiate:async v=>{calls++;reference=v.reference;amount=v.totalCents;return {success:true,pollUrl:'https://paynow.co.zw/status/test',instructions:'Authorize payment'};},poll:async()=>({paid,status,reference,amountCents:amount})};
+ const disabled=await harness(gateway);try{const user=await disabled.register('wallet-disabled');assert.equal((await disabled.request('/api/account/wallet/topups',{token:user.token,body:{amountCents:5000,phone:'0771234567'},headers:{'Idempotency-Key':randomUUID()}})).status,503);assert.equal(calls,0);}finally{await disabled.close();}
+ const h=await harness(gateway,true);try{const a=await h.register('wallet-a'),b=await h.register('wallet-b');const key=randomUUID(),req={token:a.token,body:{amountCents:10000,phone:'0771234567'},headers:{'Idempotency-Key':key}};
+ const created=await h.request('/api/account/wallet/topups',req);assert.equal(created.status,201);assert.equal((await h.request('/api/account/wallet/topups',req)).status,200);assert.equal(calls,1);assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,0);
+ assert.equal((await h.request('/api/account/wallet/topups',{...req,headers:{'Idempotency-Key':randomUUID()}})).status,409);
+ assert.equal((await h.request(`/api/account/wallet/topups/${created.data.id}/check`,{token:b.token,body:{}})).status,403);
+ paid=true;status='Awaiting Delivery';await h.request(`/api/account/wallet/topups/${created.data.id}/check`,{token:a.token,body:{}});assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,0);amount=999;paid=true;status='Paid';assert.equal((await h.request(`/api/account/wallet/topups/${created.data.id}/check`,{token:a.token,body:{}})).status,502);assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,0);amount=10000;
+ const results=await Promise.all([h.request(`/api/account/wallet/topups/${created.data.id}/check`,{token:a.token,body:{}}),h.request(`/api/account/wallet/topups/${created.data.id}/check`,{token:a.token,body:{}})]);for(const r of results)assert.equal(r.status,200);
+ assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,10000);assert.equal((await h.request('/api/account/wallet',{token:b.token})).data.balanceCents,0);
+ const {supplier}=await supplierReady(h,'wallet-company');const order=(await place(h,a,supplier,randomUUID(),{paymentMethod:'wallet',expectedTotalCents:2700,expectedCurrency:'USD'})).data;assert.equal(order.paymentStatus,'Paid');assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,7300);
+ const cancelled=await act(h,a,order,'cancel',{reason:'Changed delivery plans'});assert.equal(cancelled.data.paymentStatus,'Refunded');assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,10000);
+ paid=false;status='Refunded';for(let i=0;i<2;i++)assert.equal((await h.request(`/api/account/wallet/topups/${created.data.id}/check`,{token:a.token,body:{}})).status,200);assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,0);
+ paid=true;status='Paid';await h.request(`/api/account/wallet/topups/${created.data.id}/check`,{token:a.token,body:{}});assert.equal((await h.request('/api/account/wallet',{token:a.token})).data.balanceCents,0);
+ }finally{await h.close();}});
+
+test('gift deliveries require funded sender, recipient claim and recipient-only receipt',async()=>{const h=await harness();try{const sender=await h.register('gift-sender'),recipient=await h.register('gift-recipient'),outsider=await h.register('gift-outsider');const {supplier}=await supplierReady(h,'gift-company');
+ assert.equal((await place(h,sender,supplier,randomUUID(),{isGift:true,paymentMethod:'cash',recipientName:'Recipient Name',recipientPhone:'0771234567'})).status,400);
+ assert.equal((await place(h,sender,supplier,randomUUID(),{isGift:true,paymentMethod:'wallet',expectedTotalCents:2700,expectedCurrency:'USD',recipientName:'Recipient Name',recipientPhone:'0771234567'})).status,409);
+ await h.db.prepare('INSERT INTO wallet_entries(user_id,amount_cents,currency,reference,kind,at) VALUES(?,?,?,?,?,?)').run(sender.user.id,10000,'USD','test-funded-gift','Test-only funding',new Date().toISOString());
+ let order=(await place(h,sender,supplier,randomUUID(),{isGift:true,paymentMethod:'wallet',expectedTotalCents:2700,expectedCurrency:'USD',recipientName:'Recipient Name',recipientPhone:'0771234567',deliveryInstructions:'Use the side gate'})).data;assert.equal(order.paymentStatus,'Paid');order=(await act(h,supplier,order,'accept')).data;assert.equal((await act(h,supplier,order,'depart')).status,409);
+ const code=(await h.request(`/api/orders/${order.id}/gift-code`,{token:sender.token,body:{}})).data.code;assert.equal((await h.request(`/api/orders/${order.id}`,{token:recipient.token})).status,403);
+ const preview=await h.request('/api/account/gifts/claim',{token:recipient.token,body:{code,accept:true,preview:true}});assert.equal(preview.data.preview,true);assert.equal((await h.request(`/api/orders/${order.id}`,{token:recipient.token})).status,403);
+ assert.equal((await h.request('/api/account/gifts/claim',{token:sender.token,body:{code,accept:true}})).status,400);
+ const claimed=await h.request('/api/account/gifts/claim',{token:recipient.token,body:{code,accept:true}});assert.equal(claimed.status,200);order=claimed.data;assert.equal(order.recipientUserId,recipient.user.id);assert.equal((await h.request('/api/account/gifts/claim',{token:outsider.token,body:{code,accept:true}})).status,400);
+ assert.equal((await h.request('/api/orders',{token:recipient.token})).data.length,1);assert.equal((await h.request(`/api/orders/${order.id}`,{token:outsider.token})).status,403);
+ order=(await act(h,supplier,order,'depart')).data;order=(await act(h,supplier,order,'arrive')).data;assert.equal((await act(h,sender,order,'receive')).status,403);order=(await act(h,recipient,order,'receive')).data;assert.equal(order.status,'Delivered');
+ }finally{await h.close();}});
+
+test('wallet spending cannot race into overspend and admin cancellation refunds once',async()=>{const h=await harness();try{const buyer=await h.register('wallet-race-buyer');const {supplier}=await supplierReady(h,'wallet-race-company');await h.db.prepare('INSERT INTO wallet_entries(user_id,amount_cents,currency,reference,kind,at) VALUES(?,?,?,?,?,?)').run(buyer.user.id,3000,'USD','wallet-race-test-credit','Test-only credit',new Date().toISOString());
+ const results=await Promise.all([place(h,buyer,supplier,randomUUID(),{paymentMethod:'wallet',expectedTotalCents:2700,expectedCurrency:'USD'}),place(h,buyer,supplier,randomUUID(),{paymentMethod:'wallet',expectedTotalCents:2700,expectedCurrency:'USD'})]);assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);const order=results.find(r=>r.status===201).data;assert.equal((await h.request('/api/account/wallet',{token:buyer.token})).data.balanceCents,300);assert.equal((await h.db.prepare('SELECT stock FROM suppliers WHERE id=?').get(supplier.user.id)).stock,19000);
+ const cancelled=await h.request(`/api/admin/orders/${order.id}/cancel`,{token:h.admin.token,body:{version:order.version,reason:'Customer support approved cancellation'}});assert.equal(cancelled.status,200);assert.equal(cancelled.data.paymentStatus,'Refunded');assert.equal((await h.request('/api/account/wallet',{token:buyer.token})).data.balanceCents,3000);assert.equal((await h.request(`/api/admin/orders/${order.id}/cancel`,{token:h.admin.token,body:{version:cancelled.data.version,reason:'Repeated cancellation attempt'}})).status,409);assert.equal((await h.request('/api/account/wallet',{token:buyer.token})).data.balanceCents,3000);
+ }finally{await h.close();}});
+
+test('advance delivery requests need company confirmation and retain contact preferences',async()=>{const h=await harness();try{const customer=await h.register('advance-buyer');const {supplier}=await supplierReady(h,'advance-company');const other=await h.register('advance-other','supplier');await h.request('/api/account/preferences',{token:customer.token,method:'PUT',body:{version:0,preferences:{contactMethod:'message',deliveryInstructions:'Use the front gate'}}});
+ assert.equal((await place(h,customer,supplier,randomUUID(),{requestedDeliveryAt:new Date(Date.now()-1000).toISOString()})).status,400);
+ let order=(await place(h,customer,supplier,randomUUID(),{requestedDeliveryAt:new Date(Date.now()+7200000).toISOString()})).data;assert.equal(order.preferredContactMethod,'message');assert.equal(order.deliveryInstructions,'Use the front gate');order=(await act(h,supplier,order,'accept')).data;assert.equal((await act(h,supplier,order,'depart')).status,409);
+ assert.equal((await h.request(`/api/orders/${order.id}/schedule-confirm`,{token:customer.token,body:{version:order.version}})).status,403);assert.equal((await h.request(`/api/orders/${order.id}/schedule-confirm`,{token:other.token,body:{version:order.version}})).status,403);
+ const confirmed=await h.request(`/api/orders/${order.id}/schedule-confirm`,{token:supplier.token,body:{version:order.version}});assert.equal(confirmed.status,200);order=confirmed.data;assert.equal(order.scheduleConfirmed,true);assert.equal((await act(h,supplier,order,'depart')).status,200);
+ }finally{await h.close();}});

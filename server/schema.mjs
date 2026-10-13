@@ -11,4 +11,17 @@ export const schema = ` CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,nam
  CREATE TABLE IF NOT EXISTS vehicles(id TEXT PRIMARY KEY,company_id TEXT NOT NULL REFERENCES suppliers(id),description TEXT NOT NULL,registration TEXT NOT NULL UNIQUE);
 
  CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY,actor_id TEXT NOT NULL REFERENCES users(id),action TEXT NOT NULL,target_id TEXT NOT NULL,details TEXT NOT NULL,at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS user_preferences(user_id TEXT PRIMARY KEY REFERENCES users(id),data TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1);
+ CREATE TABLE IF NOT EXISTS saved_addresses(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),label TEXT NOT NULL,city TEXT NOT NULL,address TEXT NOT NULL,location TEXT,instructions TEXT NOT NULL DEFAULT '',archived INTEGER NOT NULL DEFAULT 0,version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS order_messages(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL REFERENCES orders(id),sender_id TEXT NOT NULL REFERENCES users(id),request_key TEXT NOT NULL,body TEXT NOT NULL,at TEXT NOT NULL,UNIQUE(sender_id,request_key));
+ CREATE TABLE IF NOT EXISTS support_tickets(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),order_id TEXT REFERENCES orders(id),category TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Open',reply TEXT,created_at TEXT NOT NULL,updated_at TEXT);
+ CREATE TABLE IF NOT EXISTS memberships(user_id TEXT PRIMARY KEY REFERENCES users(id),status TEXT NOT NULL,joined_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS wallet_entries(id INTEGER PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),amount_cents INTEGER NOT NULL,currency TEXT NOT NULL,reference TEXT NOT NULL UNIQUE,kind TEXT NOT NULL,at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS wallet_topups(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),request_key TEXT NOT NULL,amount_cents INTEGER NOT NULL,currency TEXT NOT NULL,state TEXT NOT NULL,poll_url TEXT,instructions TEXT,credited INTEGER NOT NULL DEFAULT 0,reversed INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,UNIQUE(user_id,request_key));
+ CREATE TABLE IF NOT EXISTS gift_claims(order_id TEXT PRIMARY KEY REFERENCES orders(id),hash TEXT NOT NULL UNIQUE,expires_at INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0);
+ CREATE INDEX IF NOT EXISTS saved_addresses_owner ON saved_addresses(user_id,archived);
+ CREATE INDEX IF NOT EXISTS order_messages_delivery ON order_messages(order_id,id);
+ CREATE INDEX IF NOT EXISTS support_tickets_owner ON support_tickets(user_id,status);
+ CREATE INDEX IF NOT EXISTS wallet_entries_owner_currency ON wallet_entries(user_id,currency,id);
+ CREATE INDEX IF NOT EXISTS wallet_topups_owner_date ON wallet_topups(user_id,created_at);
 `;

@@ -1,4 +1,6 @@
 import express from 'express';
+import {createWallet} from './wallet-api.mjs';
+import {mountAccount} from './account-api.mjs';
 import {mountAdmin} from './admin-api.mjs';
 import { createFleet } from './fleet.mjs';
 import helmet from 'helmet';
@@ -71,6 +73,8 @@ export async function createApp({
   const publicUrl = config.publicUrl || process.env.PUBLIC_URL || 'http://localhost:4000';
   const configuredGateway = gateway || createGateway(publicUrl);
   const currency = config.currency || process.env.CURRENCY || 'USD';
+  const walletFundingEnabled=config.walletFundingEnabled??process.env.WALLET_FUNDING_ENABLED==='true';
+  const wallet=createWallet(db,{currency,gateway:configuredGateway,fundingEnabled:walletFundingEnabled,text,fail,now});
   if (!['USD', 'ZWG'].includes(currency)) throw Error('CURRENCY must be USD or ZWG.');
   app.disable('x-powered-by');
   app.set('trust proxy', config.trustProxy ?? Number(process.env.TRUST_PROXY_HOPS || 0));
@@ -119,7 +123,7 @@ export async function createApp({
   const getOrder = async (id, user) => {
     const row = await db.prepare('SELECT * FROM orders WHERE id=?').get(id);
     if (!row) fail(404, 'Order not found.');
-    if (user.role !== 'admin' && row.customer_id !== user.id && row.supplier_id !== user.id && JSON.parse(row.data).driverId !== user.id) fail(403, 'Permission denied.');
+    if (user.role !== 'admin' && row.customer_id !== user.id && row.supplier_id !== user.id && JSON.parse(row.data).driverId !== user.id && JSON.parse(row.data).recipientUserId !== user.id) fail(403, 'Permission denied.');
     return {
       row,
       order: {
@@ -146,6 +150,8 @@ export async function createApp({
     if (!row) fail(404, 'Create your supplier profile first.');
     return row;
   };
+  wallet.mount(app,{authenticated,role,wrap,getOrder,saveOrder});
+  const account=mountAccount(app,{db,authenticated,role,wrap,text,fail,now,coordinate,getOrder,saveOrder});
   app.get('/health', async (_req, res) => {
     await db.prepare('SELECT 1').get();
     res.json({
@@ -154,7 +160,7 @@ export async function createApp({
   });
   app.get('/api/config', (_req, res) => res.json({
     currency,
-    ecocashEnabled: !!configuredGateway,
+    ecocashEnabled: !!configuredGateway,walletTopupsEnabled:!!configuredGateway&&walletFundingEnabled,
     locationMode: 'foreground-web-background-native',
     pollSeconds: 8
   }));
@@ -311,7 +317,7 @@ export async function createApp({
       mime
     });
   }));
-  const administration=mountAdmin(app,{db,authenticated,role,wrap,text,fail,now,fleet,getOrder,saveOrder});
+  const administration=mountAdmin(app,{db,authenticated,role,wrap,text,fail,now,fleet,getOrder,saveOrder,wallet});
   app.get('/api/admin/suppliers', authenticated, role('admin'), async (req, res) => res.json((await db.prepare('SELECT suppliers.*,users.name,users.email FROM suppliers JOIN users ON users.id=suppliers.id').all()).map(r => ({
     ...supplierData(r),
     ownerName: r.name,
@@ -365,7 +371,7 @@ export async function createApp({
   });
   app.get('/api/orders', authenticated, async (req, res) => {
     let rows;
-    if (req.user.role === 'admin') rows = await db.prepare('SELECT * FROM orders ORDER BY rowid DESC LIMIT 200').all();else if (req.user.role === 'driver') rows = await db.prepare("SELECT * FROM orders WHERE json_extract(data,'$.driverId')=? ORDER BY rowid DESC LIMIT 200").all(req.user.id);else rows = await db.prepare('SELECT * FROM orders WHERE customer_id=? OR supplier_id=? ORDER BY rowid DESC LIMIT 200').all(req.user.id, req.user.id);
+    if (req.user.role === 'admin') rows = await db.prepare('SELECT * FROM orders ORDER BY rowid DESC LIMIT 200').all();else if (req.user.role === 'driver') rows = await db.prepare("SELECT * FROM orders WHERE json_extract(data,'$.driverId')=? ORDER BY rowid DESC LIMIT 200").all(req.user.id);else rows = await db.prepare("SELECT * FROM orders WHERE customer_id=? OR supplier_id=? OR json_extract(data,'$.recipientUserId')=? ORDER BY rowid DESC LIMIT 200").all(req.user.id, req.user.id,req.user.id);
     res.json(rows.map(r => ({
       ...JSON.parse(r.data),
       version: r.version
@@ -392,8 +398,16 @@ export async function createApp({
     const address = text(b.address, 'Delivery address', 8, 300),
       city = text(b.city, 'City', 2, 80);
     const location = coordinate(b.location);
-    if (!['cash', 'ecocash'].includes(b.paymentMethod)) fail(400, 'Invalid payment method.');
+    if (!['cash', 'ecocash','wallet'].includes(b.paymentMethod)) fail(400, 'Invalid payment method.');
     if (b.paymentMethod === 'ecocash' && !configuredGateway) fail(503, 'EcoCash is not configured. Choose cash.');
+    if(b.isGift!==undefined&&typeof b.isGift!=='boolean')fail(400,'Invalid gift selection.');
+    if(b.isGift&&b.paymentMethod!=='wallet')fail(400,'Gift deliveries must be prepaid with verified wallet credit.');
+    const recipientName=b.isGift?text(b.recipientName,'Recipient name',2,100):null,recipientPhone=b.isGift?text(b.recipientPhone,'Recipient phone',8,30):null;
+    let requestedDeliveryAt=null;if(b.requestedDeliveryAt!=null){if(typeof b.requestedDeliveryAt!=='string')fail(400,'Invalid requested delivery time.');const at=Date.parse(b.requestedDeliveryAt);if(!Number.isFinite(at)||at<Date.now()+3600000||at>Date.now()+30*86400000)fail(400,'Advance delivery requests must be 1 hour to 30 days ahead.');requestedDeliveryAt=new Date(at).toISOString();}
+    const savedPreferences=(await account.preferences(req.user.id)).preferences;
+    const rawInstructions=b.deliveryInstructions===undefined?savedPreferences.deliveryInstructions:b.deliveryInstructions;
+    const deliveryInstructions=rawInstructions?text(rawInstructions,'Delivery instructions',1,500):'';
+    const preferredContactMethod=savedPreferences.contactMethod;
     const order = await transaction(db, async () => {
       const duplicate=await db.prepare('SELECT * FROM orders WHERE customer_id=? AND idempotency_key=?').get(req.user.id,key);
       if(duplicate)return {...JSON.parse(duplicate.data),version:duplicate.version};
@@ -403,6 +417,7 @@ export async function createApp({
       if (!(await db.prepare('SELECT id FROM users WHERE id=? AND disabled=0').get(row.id))) fail(409,'Supplier account is suspended.');
       if (!s.approved || !s.available || s.type !== type || !servesCity(s, city) || s.capacity < quantity || s.stock < quantity) fail(409, 'Supplier no longer available for this order.');
       const totalCents = Math.round(quantity * s.rateMicros / 10000) + s.deliveryCents;
+      if(b.paymentMethod==='wallet'&&(b.expectedTotalCents!==totalCents||b.expectedCurrency!==currency))fail(409,'Quote changed or was not confirmed. Refresh suppliers and confirm the exact amount and currency.');
       const order = {
         id: `AQ-${randomUUID()}`,
         customerId: req.user.id,
@@ -425,8 +440,9 @@ export async function createApp({
         status: 'Requested',
         createdAt: now(),
         updatedAt: now(),
-        driverLocation: null
+        driverLocation: null,deliveryInstructions,preferredContactMethod,requestedDeliveryAt,scheduleConfirmed:false,isGift:!!b.isGift,...(b.isGift?{recipientName,recipientPhone,recipientUserId:null}:{} )
       };
+      if(order.paymentMethod==='wallet')await wallet.debitOrder(order);
       await db.prepare('INSERT INTO orders(id,customer_id,supplier_id,idempotency_key,data) VALUES(?,?,?,?,?)').run(order.id, req.user.id, s.id, key, JSON.stringify(order));
       await db.prepare('UPDATE suppliers SET stock=stock-? WHERE id=?').run(quantity, s.id);
       await event(order.id, req.user, 'Requested');
@@ -437,6 +453,7 @@ export async function createApp({
     });
     res.status(201).json(order);
   }));
+  app.post('/api/orders/:id/schedule-confirm',authenticated,role('supplier'),wrap(async(req,res)=>{const result=await transaction(db,async()=>{const {row,order}=await getOrder(req.params.id,req.user);if(row.supplier_id!==req.user.id)fail(403,'Only the assigned company can confirm the delivery time.');if(order.requestedDeliveryAt&&Date.parse(order.requestedDeliveryAt)<=Date.now())fail(409,'The requested delivery time has passed. Contact the customer and rebook.');if(!order.requestedDeliveryAt||order.scheduleConfirmed||!['Requested','Accepted'].includes(order.status))fail(409,'This delivery time cannot be confirmed.');if(req.body.version!==row.version)fail(409,'Order changed. Refresh first.');const supplier=await supplierOwn(req.user);if(!supplier.approved||supplier.approval_expires<Date.now())fail(403,'Company approval is required.');order.scheduleConfirmed=true;order.scheduleConfirmedAt=now();return await saveOrder(row,order,req.user,'Requested delivery time confirmed');});res.json(result);}));
   app.post('/api/orders/:id/action', authenticated, wrap(async (req, res) => {
     const result = await transaction(db, async () => {
       const {
@@ -449,7 +466,8 @@ export async function createApp({
       } = req.body;
       if (version !== row.version) fail(409, 'Order changed. Refresh before trying again.');
       const supplier = req.user.id === row.supplier_id,
-        customer = req.user.id === row.customer_id;
+        customer = order.isGift?req.user.id===order.recipientUserId:req.user.id === row.customer_id;
+      const payer=req.user.id===row.customer_id;
       const driver = order.driverId === req.user.id,
         operator = order.driverId ? driver : supplier;
       const transition = {
@@ -460,6 +478,8 @@ export async function createApp({
       if (transition[action]) {
         if (action === 'accept' ? !(supplier || driver) : !operator) fail(403, 'Only the assigned driver can update this delivery.');
         const [from, to] = transition[action];
+        if(action==='depart'&&order.requestedDeliveryAt&&!order.scheduleConfirmed)fail(409,'The company must confirm the requested delivery time before departure.');
+        if(action==='depart'&&order.isGift&&!order.recipientUserId)fail(409,'The gift recipient must accept before departure.');
         if (order.status !== from) fail(409, 'Invalid delivery transition.');
         if (action === 'accept') {
           const s = supplierData(await db.prepare('SELECT * FROM suppliers WHERE id=?').get(row.supplier_id));
@@ -473,9 +493,10 @@ export async function createApp({
         }
         order.status = to;
       } else if (action === 'cancel' || action === 'decline') {
-        if (action === 'cancel' && !customer) fail(403, 'Only the customer can cancel.');
+        if (action === 'cancel' && !(customer||payer)) fail(403, 'Only the customer can cancel.');
         if (action === 'decline' && !supplier) fail(403, 'Only the assigned supplier can decline.');
         if (!['Requested', 'Accepted'].includes(order.status)) fail(409, 'Delivery has started. Contact support.');
+        await wallet.refundOrder(order);
         order.status = action === 'cancel' ? 'Cancelled' : 'Declined';
         order.reason = text(req.body.reason, 'Reason', 3, 300);
         await db.prepare('UPDATE suppliers SET stock=stock+? WHERE id=?').run(order.quantity, row.supplier_id);
@@ -623,6 +644,7 @@ export async function createApp({
   }), wrap(async (req, res) => {
     if (!configuredGateway) return res.sendStatus(503);
     const reference = typeof req.body.reference === 'string' ? req.body.reference : '';
+    if(reference.startsWith('WT-')){const t=await db.prepare('SELECT user_id FROM wallet_topups WHERE id=?').get(reference);if(t){const u=await db.prepare('SELECT * FROM users WHERE id=?').get(t.user_id);await wallet.reconcile(reference,u);}return res.sendStatus(200);}
     const row = await db.prepare('SELECT orders.customer_id FROM payment_attempts JOIN orders ON orders.id=payment_attempts.order_id WHERE reference=?').get(reference);
     if (row) {
       const user = await db.prepare('SELECT * FROM users WHERE id=?').get(row.customer_id);
