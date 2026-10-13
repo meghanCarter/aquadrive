@@ -2,7 +2,7 @@
 # Do not apply until existing records are backed up/migrated and the database is tested.
 services:
   - type: web
-    name: aquadrive-demo
+    name: aquadrive
     runtime: node
     plan: free
     numInstances: 1

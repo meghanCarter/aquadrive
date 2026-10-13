@@ -1,11 +1,11 @@
 import {DatabaseSync} from 'node:sqlite';
 import {openDb,transaction} from './db.mjs';
 import {resolve} from 'node:path';
-export const tables=['users','suppliers','documents','drivers','driver_invites','vehicles','orders','events','payment_attempts','sessions','document_tickets','admin_audit'];
+export const tables=['users','suppliers','documents','drivers','driver_invites','vehicles','orders','events','payment_attempts','sessions','document_tickets','admin_audit','user_preferences','saved_addresses','order_messages','support_tickets','memberships','wallet_entries','wallet_topups','gift_claims'];
 export async function migrate(sourcePath,target){
  const source=new DatabaseSync(resolve(sourcePath),{readOnly:true});source.exec('BEGIN;');
  try{return await transaction(target,async()=>{
-  for(const table of tables){if((await target.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).n)throw Error('Destination must be empty. No records were changed.');}
+  const countsBefore=await target.prepare(tables.map(t=>`SELECT '${t}' AS name,COUNT(*) AS n FROM ${t}`).join(' UNION ALL ')).all();if(countsBefore.some(r=>r.n))throw Error('Destination must be empty. No records were changed.');
   const counts={},statements=[];
   for(const table of tables){if(!source.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)){counts[table]=0;continue;}
    const rows=source.prepare(`SELECT * FROM ${table}`).all();counts[table]=rows.length;

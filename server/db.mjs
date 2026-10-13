@@ -1,24 +1,17 @@
-import {createClient} from '@libsql/client';
-import {AsyncLocalStorage} from 'node:async_hooks';
+import {DatabaseSync} from 'node:sqlite';
 import {mkdirSync} from 'node:fs';
-import {dirname,resolve} from 'node:path';
-import {schema} from './schema.mjs';
-export async function openDb(path,{url,authToken,client:provided}={}) {
- const remote=url||process.env.TURSO_DATABASE_URL;
- const token=authToken||process.env.TURSO_AUTH_TOKEN;
- if(remote&&!/^(libsql|https):\/\//.test(remote))throw Error('Database URL must use libsql:// or https://.');
- if(remote&&!token&&!provided)throw Error('TURSO_AUTH_TOKEN is required.');
- if(!remote&&path!==':memory:')mkdirSync(dirname(resolve(path)),{recursive:true});
- const client=provided||createClient({url:remote||(path===':memory:'?'file::memory:':`file:${resolve(path)}`),...(remote?{authToken:token}:{}),intMode:'number'});
- const context=new AsyncLocalStorage();
- await client.executeMultiple('PRAGMA foreign_keys=ON;'+schema);
- let pending=Promise.resolve();
- const exclusive=fn=>{const work=pending.then(fn);pending=work.catch(()=>{});return work;};
- const execute=(sql,args)=>{const tx=context.getStore();if(tx)return tx.execute({sql,args});return remote?client.execute({sql,args}):exclusive(()=>client.execute({sql,args}));};
- const db={kind:remote?'turso':'local',client,batch:statements=>{const tx=context.getStore();return tx?tx.batch(statements):exclusive(()=>client.batch(statements,'write'));},prepare(sql){return {get:async(...args)=>(await execute(sql,args)).rows[0],all:async(...args)=>(await execute(sql,args)).rows,run:async(...args)=>{const r=await execute(sql,args);return {changes:r.rowsAffected,lastInsertRowid:r.lastInsertRowid};}};},close:()=>client.close(),async transaction(fn){
-  if(context.getStore())throw Error('Nested transactions are not supported.');
-  return exclusive(async()=>{const tx=await client.transaction('write');try{const value=await context.run(tx,fn);await tx.commit();return value;}catch(e){await tx.rollback().catch(()=>{});throw e;}finally{tx.close();}});
- }};
- return db;
+import {dirname} from 'node:path';
+export function openDb(path) {
+ if(path!==':memory:')mkdirSync(dirname(path),{recursive:true});
+ const db=new DatabaseSync(path);db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+ CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,phone TEXT NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('customer','supplier','admin')),disabled INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS suppliers(id TEXT PRIMARY KEY REFERENCES users(id),profile TEXT NOT NULL,approved INTEGER NOT NULL DEFAULT 0,approval_expires INTEGER NOT NULL DEFAULT 0,available INTEGER NOT NULL DEFAULT 0,stock INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL REFERENCES users(id),name TEXT NOT NULL,mime TEXT NOT NULL,bytes BLOB NOT NULL,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY,customer_id TEXT NOT NULL REFERENCES users(id),supplier_id TEXT NOT NULL REFERENCES suppliers(id),idempotency_key TEXT NOT NULL,data TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,UNIQUE(customer_id,idempotency_key));
+ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,order_id TEXT NOT NULL REFERENCES orders(id),actor_id TEXT NOT NULL REFERENCES users(id),action TEXT NOT NULL,at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS payment_attempts(order_id TEXT PRIMARY KEY REFERENCES orders(id),reference TEXT NOT NULL UNIQUE,state TEXT NOT NULL,poll_url TEXT,instructions TEXT,updated_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS document_tickets(hash TEXT PRIMARY KEY,document_id TEXT NOT NULL REFERENCES documents(id),user_id TEXT NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL);
+ `);return db;
 }
-export const transaction=(db,fn)=>db.transaction(fn);
+export function transaction(db,fn){db.exec('BEGIN IMMEDIATE');try{const value=fn();db.exec('COMMIT');return value;}catch(e){db.exec('ROLLBACK');throw e;}}

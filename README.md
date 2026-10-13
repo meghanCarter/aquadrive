@@ -4,6 +4,10 @@ A mobile client and persistent API for water delivery. Supports tanker water and
 
 **Status (13 October 2026):** AQUADRIVE is the live application, backed by Turso storage. The administrator/database and company-fleet release is deployed, and a verification account/session survived two redeploys. The existing hosting address is https://aquadrive-demo.onrender.com; the address still contains the old service name and is pending a hosting rename. It does not describe the current database as temporary. The updated APK, scheduled backups/restoration, physical-phone GPS checks and configured live EcoCash verification remain outstanding.
 
+## Account upgrade
+
+The account release adds saved home/work addresses, appearance/accessibility settings, delivery messages, support, free membership, advance delivery requests and wallet/gift workflows. Automatic wallet funding remains disabled until merchant verification and approved financial operations. See ACCOUNT_FEATURES_RELEASE.md for controls and activation limits.
+
 ## Contents
 
 - `aquadrive/`: Expo SDK 57 mobile client using Expo Router.
