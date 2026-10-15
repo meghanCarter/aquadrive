@@ -36,3 +36,6 @@ Admin Database exposes sanitized notifications and push job state, attempts and 
 5. Enable PUSH_NOTIFICATIONS_ENABLED only for the controlled test; assess latency on free hosting before any reliability claim.
 
 Tests cover PIN recipient/operator boundaries, expiry, lockout persistence, one-time consumption, inbox ownership/read state, GPS suppression, funding-independent push activation gate, queued retries/receipts, device revocation and logout. Physical device behaviour and native credential validity cannot be established by these backend checks.
+
+## Android client configuration received
+The Firebase client file for aquadrive-85381 / com.aquadrive.mobile is included as aquadrive/google-services.json and referenced by app.config.js. This is client configuration, not an FCM service-account private key. FCM v1 server credentials in EAS, APK rebuild and physical-device verification are still required before enabling background push.
