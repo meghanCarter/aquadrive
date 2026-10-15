@@ -24,4 +24,10 @@ export const schema = ` CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,nam
  CREATE INDEX IF NOT EXISTS support_tickets_owner ON support_tickets(user_id,status);
  CREATE INDEX IF NOT EXISTS wallet_entries_owner_currency ON wallet_entries(user_id,currency,id);
  CREATE INDEX IF NOT EXISTS wallet_topups_owner_date ON wallet_topups(user_id,created_at);
+ CREATE TABLE IF NOT EXISTS delivery_pins(order_id TEXT PRIMARY KEY REFERENCES orders(id),hash TEXT NOT NULL,expires_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,locked_until INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS notifications(id INTEGER PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),order_id TEXT NOT NULL REFERENCES orders(id),event_id INTEGER NOT NULL REFERENCES events(id),title TEXT NOT NULL,at TEXT NOT NULL,read_at TEXT,UNIQUE(user_id,event_id));
+ CREATE TABLE IF NOT EXISTS push_devices(token TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),session_hash TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1);
+ CREATE TABLE IF NOT EXISTS push_jobs(id INTEGER PRIMARY KEY,notification_id INTEGER NOT NULL REFERENCES notifications(id),token TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL,ticket TEXT,error TEXT,UNIQUE(notification_id,token));
+ CREATE INDEX IF NOT EXISTS notifications_owner ON notifications(user_id,id);
+ CREATE INDEX IF NOT EXISTS push_jobs_pending ON push_jobs(state,next_at);
 `;

@@ -20,6 +20,8 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: PUSH_NOTIFICATIONS_ENABLED
+        value: "false"
       - key: CURRENCY
         value: USD
       - key: TRUST_PROXY_HOPS
