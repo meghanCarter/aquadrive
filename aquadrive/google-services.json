@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "493214512939",
+    "project_id": "aquadrive-85381",
+    "storage_bucket": "aquadrive-85381.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:493214512939:android:fa0263e245c754ed3a376e",
+        "android_client_info": {
+          "package_name": "com.aquadrive.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDaqnulmTC1vAggXljyf2vF24Okbc225Es"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
