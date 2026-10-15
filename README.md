@@ -74,3 +74,6 @@ From `aquadrive/`: `npm run typecheck`, `npm run lint`.
 From `server/`: `npm test`.
 
 Source projects include lockfiles. The release exports are JavaScript/Hermes bundles, not installable Android packages.
+
+## Delivery confirmation and notification release
+Delivery recipients can request private expiring PINs for their assigned operator, or confirm directly through their account. Persistent order notifications include driver assignments and delivery transitions. Background push remains disabled until native credentials and device tests are complete. See DELIVERY_RELIABILITY_RELEASE.md.

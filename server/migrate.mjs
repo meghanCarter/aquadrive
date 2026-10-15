@@ -1,7 +1,7 @@
 import {DatabaseSync} from 'node:sqlite';
 import {openDb,transaction} from './db.mjs';
 import {resolve} from 'node:path';
-export const tables=['users','suppliers','documents','drivers','driver_invites','vehicles','orders','events','payment_attempts','sessions','document_tickets','admin_audit','user_preferences','saved_addresses','order_messages','support_tickets','memberships','wallet_entries','wallet_topups','gift_claims'];
+export const tables=['users','suppliers','documents','drivers','driver_invites','vehicles','orders','events','payment_attempts','sessions','document_tickets','admin_audit','user_preferences','saved_addresses','order_messages','support_tickets','memberships','wallet_entries','wallet_topups','gift_claims','delivery_pins','notifications','push_devices','push_jobs'];
 export async function migrate(sourcePath,target){
  const source=new DatabaseSync(resolve(sourcePath),{readOnly:true});source.exec('BEGIN;');
  try{return await transaction(target,async()=>{

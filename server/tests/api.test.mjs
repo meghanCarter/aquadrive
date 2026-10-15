@@ -1,3 +1,4 @@
+import {createNotifications} from '../notifications.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -7,7 +8,7 @@ import { join } from 'node:path';
 import { createApp } from '../app.mjs';
 import { hashPassword, session } from '../auth.mjs';
 const password = 'AquaTestPassword2026!';
-async function harness(gateway,walletFundingEnabled=false) {
+async function harness(gateway,walletFundingEnabled=false,pushEnabled=false) {
   const {
     app,
     db
@@ -15,7 +16,7 @@ async function harness(gateway,walletFundingEnabled=false) {
     dbPath: ':memory:',
     gateway,
     config: {
-      publicUrl: 'http://localhost:4000',walletFundingEnabled
+      publicUrl: 'http://localhost:4000',walletFundingEnabled,pushEnabled
     }
   });
   const server = app.listen(0, '127.0.0.1');
@@ -909,7 +910,7 @@ test('gift deliveries require funded sender, recipient claim and recipient-only 
  assert.equal((await h.request('/api/account/gifts/claim',{token:sender.token,body:{code,accept:true}})).status,400);
  const claimed=await h.request('/api/account/gifts/claim',{token:recipient.token,body:{code,accept:true}});assert.equal(claimed.status,200);order=claimed.data;assert.equal(order.recipientUserId,recipient.user.id);assert.equal((await h.request('/api/account/gifts/claim',{token:outsider.token,body:{code,accept:true}})).status,400);
  assert.equal((await h.request('/api/orders',{token:recipient.token})).data.length,1);assert.equal((await h.request(`/api/orders/${order.id}`,{token:outsider.token})).status,403);
- order=(await act(h,supplier,order,'depart')).data;order=(await act(h,supplier,order,'arrive')).data;assert.equal((await act(h,sender,order,'receive')).status,403);order=(await act(h,recipient,order,'receive')).data;assert.equal(order.status,'Delivered');
+ order=(await act(h,supplier,order,'depart')).data;order=(await act(h,supplier,order,'arrive')).data;assert.equal((await act(h,sender,order,'receive')).status,403);assert.equal((await h.request(`/api/orders/${order.id}/delivery-pin`,{token:sender.token,body:{}})).status,403);assert.equal((await h.request(`/api/orders/${order.id}/delivery-pin`,{token:recipient.token,body:{}})).status,200);order=(await act(h,recipient,order,'receive')).data;assert.equal(await h.db.prepare('SELECT * FROM delivery_pins WHERE order_id=?').get(order.id),undefined);assert.equal(order.status,'Delivered');
  }finally{await h.close();}});
 
 test('wallet spending cannot race into overspend and admin cancellation refunds once',async()=>{const h=await harness();try{const buyer=await h.register('wallet-race-buyer');const {supplier}=await supplierReady(h,'wallet-race-company');await h.db.prepare('INSERT INTO wallet_entries(user_id,amount_cents,currency,reference,kind,at) VALUES(?,?,?,?,?,?)').run(buyer.user.id,3000,'USD','wallet-race-test-credit','Test-only credit',new Date().toISOString());
@@ -923,3 +924,76 @@ test('advance delivery requests need company confirmation and retain contact pre
  assert.equal((await h.request(`/api/orders/${order.id}/schedule-confirm`,{token:customer.token,body:{version:order.version}})).status,403);assert.equal((await h.request(`/api/orders/${order.id}/schedule-confirm`,{token:other.token,body:{version:order.version}})).status,403);
  const confirmed=await h.request(`/api/orders/${order.id}/schedule-confirm`,{token:supplier.token,body:{version:order.version}});assert.equal(confirmed.status,200);order=confirmed.data;assert.equal(order.scheduleConfirmed,true);assert.equal((await act(h,supplier,order,'depart')).status,200);
  }finally{await h.close();}});
+
+test('delivery PIN is recipient-only, expires, locks after five failures and is consumed once',async()=>{
+ const h=await harness();try{
+  const c=await h.register('pinRecipient'),other=await h.register('pinOther');const {supplier}=await supplierReady(h,'pinCompany');let o=(await place(h,c,supplier)).data;
+  assert.equal((await h.request(`/api/orders/${o.id}/delivery-pin`,{token:c.token,body:{}})).status,409);
+  for(const action of ['accept','depart','arrive'])o=(await act(h,supplier,o,action)).data;
+  for(const who of [supplier,other])assert.equal((await h.request(`/api/orders/${o.id}/delivery-pin`,{token:who.token,body:{}})).status,403);
+  let p=await h.request(`/api/orders/${o.id}/delivery-pin`,{token:c.token,body:{}});assert.match(p.data.pin,/^\d{6}$/);
+  assert.equal((await h.request(`/api/orders/${o.id}/delivery-pin`,{token:c.token,body:{}})).status,429);
+  const row=await h.db.prepare('SELECT * FROM delivery_pins WHERE order_id=?').get(o.id);assert.notEqual(row.hash,p.data.pin);
+  const confirm=(pin,who=supplier)=>h.request(`/api/orders/${o.id}/confirm-delivery`,{token:who.token,body:{pin,version:o.version}});
+  assert.equal((await confirm(p.data.pin,c)).status,403);
+  const wrong=p.data.pin==='100000'?'100001':'100000';for(let i=0;i<5;i++)assert.equal((await confirm(wrong)).status,400);
+  assert.equal((await confirm(p.data.pin)).status,429);
+  assert.equal((await h.request(`/api/orders/${o.id}/delivery-pin`,{token:c.token,body:{}})).status,429);
+  assert.equal((await h.db.prepare('SELECT attempts FROM delivery_pins WHERE order_id=?').get(o.id)).attempts,5);
+  await h.db.prepare('UPDATE delivery_pins SET locked_until=0,created_at=0 WHERE order_id=?').run(o.id);
+  p=await h.request(`/api/orders/${o.id}/delivery-pin`,{token:c.token,body:{}});
+  await h.db.prepare('UPDATE delivery_pins SET expires_at=0 WHERE order_id=?').run(o.id);assert.equal((await confirm(p.data.pin)).status,409);
+  await h.db.prepare('UPDATE delivery_pins SET expires_at=? WHERE order_id=?').run(Date.now()+60000,o.id);
+  const done=await confirm(p.data.pin);assert.equal(done.status,200);assert.equal(done.data.status,'Delivered');assert.equal(done.data.deliveryConfirmationMethod,'Recipient PIN');assert.equal(done.data.deliveryConfirmedBy,supplier.user.id);
+  assert.equal((await confirm(p.data.pin)).status,409);assert.equal(await h.db.prepare('SELECT * FROM delivery_pins WHERE order_id=?').get(o.id),undefined);
+  const data=(await h.request('/api/account/data-export',{token:c.token,body:{}})).data;assert.ok(!JSON.stringify(data).includes(p.data.pin));
+ }finally{await h.close();}
+});
+
+test('notification inbox isolates owners, avoids GPS spam and supports read state',async()=>{
+ const h=await harness();try{
+  const c=await h.register('noticeCustomer'),other=await h.register('noticeOther');const {supplier}=await supplierReady(h,'noticeCompany');let o=(await place(h,c,supplier)).data;
+  const inbox=(who)=>h.request('/api/account/notifications',{token:who.token});
+  const n=(await inbox(supplier)).data;assert.equal(n.unread,1);assert.equal(n.rows[0].order_id,o.id);assert.equal((await inbox(c)).data.unread,0);
+  assert.equal((await h.request(`/api/account/notifications/${n.rows[0].id}/read`,{token:other.token,body:{}})).status,404);
+  await h.request(`/api/account/notifications/${n.rows[0].id}/read`,{token:supplier.token,body:{}});assert.equal((await inbox(supplier)).data.unread,0);
+  o=(await act(h,supplier,o,'accept')).data;assert.equal((await inbox(c)).data.rows[0].title,'Delivery accepted');
+  o=(await act(h,supplier,o,'depart')).data;const before=(await inbox(c)).data.unread;
+  const gps=await h.request(`/api/orders/${o.id}/location`,{token:supplier.token,body:{latitude:-17.8,longitude:31.0,accuracy:10,capturedAt:Date.now()}});assert.equal(gps.status,200);
+  assert.equal((await inbox(c)).data.unread,before);
+  assert.equal((await inbox(other)).data.unread,0);assert.equal((await h.request('/api/account/notifications')).status,401);
+  assert.equal((await h.request('/api/account/push-device',{token:c.token,body:{token:'ExpoPushToken[abcdefghijk123]',enabled:true}})).status,503);
+ }finally{await h.close();}
+});
+
+test('push queue retries failures, checks receipts, revokes bad devices and respects logout',async()=>{
+ const h=await harness(undefined,false,true);try{
+  const c=await h.register('pushCustomer');const {supplier}=await supplierReady(h,'pushCompany');const token='ExpoPushToken[test123456789]';
+  assert.equal((await h.request('/api/account/push-device',{token:c.token,body:{token,enabled:true}})).status,200);
+  let o=(await place(h,c,supplier)).data;o=(await act(h,supplier,o,'accept')).data;
+  let time=Date.now(),calls=0,mode='fail';
+  const worker=createNotifications(h.db,{enabled:true,clock:()=>time,fetcher:async(url,options)=>{calls++;if(mode==='fail')throw Error('offline');const body=JSON.parse(options.body);assert.ok(!JSON.stringify(body).includes('Main Street'));return {ok:true,json:async()=>({data:url.endsWith('getReceipts')?{'ticket-1':mode==='revoke'?{status:'error',details:{error:'DeviceNotRegistered'}}:{status:'ok'}}:{status:'ok',id:'ticket-1'}})};}});
+  await worker.drain();let j=await h.db.prepare('SELECT * FROM push_jobs').get();assert.equal(j.state,'Pending');assert.equal(j.attempts,1);
+  time+=120000;mode='ok';await worker.drain();j=await h.db.prepare('SELECT * FROM push_jobs').get();assert.equal(j.state,'Ticket');
+  time+=900001;await worker.drain();j=await h.db.prepare('SELECT * FROM push_jobs').get();assert.equal(j.state,'ProviderAccepted');const count=calls;await worker.drain();assert.equal(calls,count);
+  o=(await act(h,supplier,o,'depart')).data;await worker.drain();time+=900001;mode='revoke';await worker.drain();assert.equal((await h.db.prepare('SELECT enabled FROM push_devices WHERE token=?').get(token)).enabled,0);
+  await h.request('/api/account/push-device',{token:c.token,body:{token,enabled:true}});o=(await act(h,supplier,o,'arrive')).data;
+  await h.request('/api/auth/logout',{token:c.token,body:{}});const old=calls;await worker.drain();assert.equal(calls,old);
+ }finally{await h.close();}
+});
+
+
+test('only the assigned driver can submit a recipient delivery PIN',async()=>{
+ const h=await harness();try{
+  const c=await h.register('driverPinCustomer'),driver=await h.register('pinDriver','supplier'),other=await h.register('pinUnassigned','supplier');const {supplier}=await supplierReady(h,'driverPinCompany');
+  await h.db.prepare('INSERT INTO drivers(user_id,company_id) VALUES(?,?)').run(driver.user.id,supplier.user.id);
+  await h.db.prepare('INSERT INTO drivers(user_id,company_id) VALUES(?,?)').run(other.user.id,supplier.user.id);
+  const vehicle=(await h.request('/api/company/vehicles',{token:supplier.token,body:{description:'Test water tanker',registration:'PIN-TEST'}})).data;
+  let o=(await place(h,c,supplier)).data;o=(await h.request(`/api/orders/${o.id}/assign`,{token:supplier.token,body:{driverId:driver.user.id,vehicleId:vehicle.id,version:o.version}})).data;
+  const messages=(await h.request('/api/account/notifications',{token:driver.token})).data;assert.equal(messages.rows[0].title,'Driver assignment updated');
+  for(const action of ['accept','depart','arrive'])o=(await act(h,driver,o,action)).data;
+  const p=(await h.request(`/api/orders/${o.id}/delivery-pin`,{token:c.token,body:{}})).data;
+  for(const who of [supplier,other])assert.equal((await h.request(`/api/orders/${o.id}/confirm-delivery`,{token:who.token,body:{version:o.version,pin:p.pin}})).status,403);
+  const result=await h.request(`/api/orders/${o.id}/confirm-delivery`,{token:driver.token,body:{version:o.version,pin:p.pin}});assert.equal(result.status,200);assert.equal(result.data.deliveryConfirmedBy,driver.user.id);
+ }finally{await h.close();}
+});

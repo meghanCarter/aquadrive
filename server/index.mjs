@@ -8,7 +8,7 @@ if (production && (!process.env.PUBLIC_URL?.startsWith('https://') || !process.e
 if (production && process.env.REQUIRE_DURABLE_STORAGE==='true' && !process.env.TURSO_DATABASE_URL) throw Error('Durable external storage is required; refusing a local fallback.');
 const {
   app,
-  db
+  db,notifications
 } = await createApp();
 if(process.env.ADMIN_EMAIL||process.env.ADMIN_PASSWORD){if(production&&db.kind!=='turso')throw Error('Configure durable Turso storage before provisioning an administrator.');if(await provisionAdmin(db))console.log('Administrator provisioned; remove ADMIN_PASSWORD from server environment.');}
 mountMaps(app);
@@ -19,9 +19,10 @@ if (existsSync('./public/index.html')) {
   app.get('/{*path}', (_req, res) => res.sendFile(new URL('./public/index.html', import.meta.url).pathname));
 }
 const server = app.listen(Number(process.env.PORT || 4000), '0.0.0.0', () => console.log(`AQUADRIVE API listening on port ${process.env.PORT || 4000}`));
-const close = () => server.close(() => {
+const pushTimer=setInterval(()=>void notifications.drain().catch(()=>console.error('Notification dispatch failed; pending jobs will retry.')),30000);pushTimer.unref();
+const close = () => {clearInterval(pushTimer);server.close(() => {
   db.close();
   process.exit(0);
-});
+});};
 process.on('SIGTERM', close);
 process.on('SIGINT', close);

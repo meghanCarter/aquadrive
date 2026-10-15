@@ -1,4 +1,6 @@
 import express from 'express';
+import {mountDeliveryProof} from './delivery-proof.mjs';
+import {createNotifications} from './notifications.mjs';
 import {createWallet} from './wallet-api.mjs';
 import {mountAccount} from './account-api.mjs';
 import {mountAdmin} from './admin-api.mjs';
@@ -132,7 +134,11 @@ export async function createApp({
       }
     };
   };
-  const event = async (id, user, action) => await db.prepare('INSERT INTO events(order_id,actor_id,action,at) VALUES(?,?,?,?)').run(id, user.id, action, now());
+  const notifications=createNotifications(db,{enabled:config.pushEnabled??process.env.PUSH_NOTIFICATIONS_ENABLED==='true',accessToken:process.env.EXPO_ACCESS_TOKEN||''});
+  const event=async(id,user,action)=>{
+    const e=await db.prepare('INSERT INTO events(order_id,actor_id,action,at) VALUES(?,?,?,?)').run(id,user.id,action,now());
+    if(action!=='location'){const row=await db.prepare('SELECT data FROM orders WHERE id=?').get(id);await notifications.record(JSON.parse(row.data),user.id,action,Number(e.lastInsertRowid));}
+  };
   const saveOrder = async (row, order, user, action) => {
     const data = {
       ...order
@@ -150,6 +156,8 @@ export async function createApp({
     if (!row) fail(404, 'Create your supplier profile first.');
     return row;
   };
+  mountDeliveryProof(app,{db,authenticated,wrap,fail,getOrder,saveOrder,now});
+  notifications.mount(app,{authenticated,wrap,fail});
   wallet.mount(app,{authenticated,role,wrap,getOrder,saveOrder});
   const account=mountAccount(app,{db,authenticated,role,wrap,text,fail,now,coordinate,getOrder,saveOrder});
   app.get('/health', async (_req, res) => {
@@ -204,6 +212,7 @@ export async function createApp({
     });
   }));
   app.post('/api/auth/logout', authenticated, async (req, res) => {
+    await db.prepare('DELETE FROM push_devices WHERE session_hash=?').run(tokenHash(req.token));
     await db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(req.token));
     res.json({
       ok: true
@@ -503,7 +512,8 @@ export async function createApp({
       } else if (action === 'receive') {
         if (!customer) fail(403, 'Only the customer can confirm receipt.');
         if (order.status !== 'Arrived') fail(409, 'Supplier must mark arrival first.');
-        order.status = 'Delivered';
+        order.status = 'Delivered';order.deliveryConfirmedAt=now();order.deliveryConfirmedBy=req.user.id;order.deliveryConfirmationMethod='Recipient account';
+        await db.prepare('DELETE FROM delivery_pins WHERE order_id=?').run(order.id);
       } else if (action === 'cash') {
         if (!(supplier || driver) || order.paymentMethod !== 'cash') fail(403, 'Only the supplier can record cash collection.');
         if (order.status !== 'Delivered' || order.paymentStatus === 'Paid') fail(409, 'Cash collection requires an unpaid completed delivery.');
@@ -665,6 +675,6 @@ export async function createApp({
   });
   return {
     app,
-    db
+    db,notifications
   };
 }
